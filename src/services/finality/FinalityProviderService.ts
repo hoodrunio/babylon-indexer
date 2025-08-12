@@ -54,8 +54,13 @@ export class FinalityProviderService {
 
     /**
      * Maps Network enum to BSN-ID for finality provider endpoints
+     * Can be overridden with a custom BSN ID
      */
-    private getBsnId(network: Network): string {
+    private getBsnId(network: Network, customBsnId?: string): string {
+        if (customBsnId) {
+            return customBsnId;
+        }
+        
         switch (network) {
             case Network.MAINNET:
                 return 'bbn-1';
@@ -145,6 +150,71 @@ export class FinalityProviderService {
         };
         await this.cache.set(cacheKey, entry, ttl);
         return data;
+    }
+
+    /**
+     * Get active finality providers for a specific BSN
+     */
+    public async getActiveFinalityProvidersForBSN(
+        bsnId: string, 
+        network: Network = this.network
+    ): Promise<FinalityProvider[]> {
+        const cacheKey = `fp:active:${bsnId}:${network}`;
+        return this.getWithRevalidate(
+            cacheKey,
+            this.CACHE_TTL.PROVIDERS_LIST,
+            async () => {
+                const { nodeUrl } = this.getNetworkConfig();
+                
+                // 1. First, get the latest block height
+                const currentHeight = await this.babylonClient.getCurrentHeight();
+                
+                // 2. Get active FPs from the last block
+                const activeResponse = await fetch(`${nodeUrl}/babylon/finality/v1/finality_providers/${currentHeight}`);
+                if (!activeResponse.ok) {
+                    throw new Error(`HTTP error! status: ${activeResponse.status}`);
+                }
+                
+                const activeData = await activeResponse.json() as ActiveProviderResponse;
+                
+                // Get public keys of active FPs into a set
+                const activePkSet = new Set(
+                    activeData.finality_providers.map((fp: FinalityProviderWithMeta) => fp.btc_pk_hex)
+                );
+                
+                // 3. Get detailed information of FPs for specific BSN
+                const allProviders: FinalityProvider[] = [];
+                let nextKey = '';
+                
+                do {
+                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
+                    if (nextKey) {
+                        url.searchParams.append('pagination.key', nextKey);
+                    }
+                    
+                    const response = await fetch(url.toString());
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const data = await response.json() as QueryFinalityProvidersResponse;
+                    
+                    // Filter only active FP details and add BSN ID
+                    const activeProviders = data.finality_providers?.filter(provider => 
+                        activePkSet.has(provider.btc_pk)
+                    ).map(provider => ({
+                        ...provider,
+                        bsn_id: bsnId
+                    })) || [];
+                    
+                    allProviders.push(...activeProviders);
+                    
+                    nextKey = data.pagination?.next_key || '';
+                } while (nextKey);
+                
+                return allProviders;
+            }
+        );
     }
 
     public async getActiveFinalityProviders(network: Network = this.network): Promise<FinalityProvider[]> {
