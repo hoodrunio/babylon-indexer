@@ -8,7 +8,8 @@ import {
     ConsumerRegisterResponse, 
     BSNConsumerParams,
     ConsumerListQuery,
-    ConsumerStats
+    ConsumerStats,
+    ConsumerRegister
 } from '../../types/bsn/consumer';
 import { BabylonClient } from '../../clients/BabylonClient';
 import { CacheService } from '../CacheService';
@@ -149,7 +150,7 @@ export class BSNConsumerService {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const data = await response.json();
+                const data = await response.json() as { params?: BSNConsumerParams };
                 return data.params || {};
             }
         );
@@ -190,8 +191,25 @@ export class BSNConsumerService {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const data = await response.json();
-                const consumers = data.consumer_registers || [];
+                const data = await response.json() as { 
+                    consumer_registers?: ConsumerRegister[]; 
+                    pagination?: { total?: number; next_key?: string } 
+                };
+                const rawConsumers = data.consumer_registers || [];
+                
+                // Transform to response format
+                const consumers: ConsumerRegisterResponse[] = rawConsumers.map((consumer: ConsumerRegister) => ({
+                    consumer_id: consumer.consumer_id,
+                    consumer_name: consumer.consumer_name,
+                    consumer_description: consumer.consumer_description,
+                    consumer_type: consumer.consumer_type,
+                    cosmos_channel_id: consumer.cosmos_metadata?.channel_id,
+                    rollup_finality_contract_address: consumer.rollup_metadata?.finality_contract_address,
+                    babylon_rewards_commission: consumer.babylon_rewards_commission,
+                    is_active: consumer.is_active,
+                    registration_time: consumer.created_at,
+                    last_activity: consumer.updated_at
+                }));
                 
                 // Apply client-side filtering if needed
                 let filteredConsumers = consumers;
@@ -215,9 +233,9 @@ export class BSNConsumerService {
                         const bValue = b[query.sort_by as keyof ConsumerRegisterResponse];
                         
                         if (query.sort_order === 'desc') {
-                            return bValue > aValue ? 1 : -1;
+                            return (bValue || 0) > (aValue || 0) ? 1 : -1;
                         }
-                        return aValue > bValue ? 1 : -1;
+                        return (aValue || 0) > (bValue || 0) ? 1 : -1;
                     });
                 }
 
@@ -254,8 +272,22 @@ export class BSNConsumerService {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const data = await response.json();
-                return data.consumer_registers || [];
+                const data = await response.json() as { consumer_registers?: ConsumerRegister[] };
+                const rawConsumers = data.consumer_registers || [];
+                
+                // Transform to response format
+                return rawConsumers.map((consumer: ConsumerRegister) => ({
+                    consumer_id: consumer.consumer_id,
+                    consumer_name: consumer.consumer_name,
+                    consumer_description: consumer.consumer_description,
+                    consumer_type: consumer.consumer_type,
+                    cosmos_channel_id: consumer.cosmos_metadata?.channel_id,
+                    rollup_finality_contract_address: consumer.rollup_metadata?.finality_contract_address,
+                    babylon_rewards_commission: consumer.babylon_rewards_commission,
+                    is_active: consumer.is_active,
+                    registration_time: consumer.created_at,
+                    last_activity: consumer.updated_at
+                }));
             }
         );
     }

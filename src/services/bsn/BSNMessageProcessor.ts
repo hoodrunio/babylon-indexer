@@ -106,7 +106,7 @@ export class BSNMessageProcessor {
                 existingConsumer.rollup_finality_contract_address = msg.rollup_finality_contract_address;
                 existingConsumer.babylon_rewards_commission = msg.babylon_rewards_commission;
                 existingConsumer.last_updated_height = blockHeight;
-                existingConsumer.updated_at = new Date();
+                existingConsumer.updatedAt = new Date();
 
                 await existingConsumer.save();
             } else {

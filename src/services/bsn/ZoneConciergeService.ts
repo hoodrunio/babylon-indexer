@@ -149,7 +149,7 @@ export class ZoneConciergeService {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const data = await response.json();
+                const data = await response.json() as { params?: ZoneConciergeParams };
                 return data.params || {};
             }
         );
@@ -185,7 +185,7 @@ export class ZoneConciergeService {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
-                const data = await response.json();
+                const data = await response.json() as { finalized_bsns_data?: FinalizedBSNData[] };
                 return data.finalized_bsns_data || [];
             }
         );
