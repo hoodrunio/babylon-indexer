@@ -22,6 +22,11 @@ export const MESSAGE_TYPES = {
   // IBC module
   IBC_TRANSFER: '/ibc.applications.transfer.v1.MsgTransfer',
   
+  // BSN (Bitcoin Supercharged Networks) message types
+  BSN_REGISTER_CONSUMER: '/babylon.btcstkconsumer.v1.MsgRegisterConsumer',
+  BSN_UPDATE_CONSUMER_PARAMS: '/babylon.btcstkconsumer.v1.MsgUpdateParams',
+  BSN_UPDATE_ZONECONCIERGE_PARAMS: '/babylon.zoneconcierge.v1.MsgUpdateParams',
+  
   // Other message types can be added here
 };
 

@@ -7,6 +7,7 @@ import { BlockProcessorError, TxProcessorError } from '../types/common';
 import { IBlockProcessorService, IBlockStorage, ITransactionProcessorService, ITxStorage } from '../types/interfaces';
 import { logger } from '../../../utils/logger';
 import { Network } from '../../../types/finality';
+import { BSNIntegrationService } from '../../bsn/BSNIntegrationService';
 
 /**
  * Singleton class for Block and Transaction Handler
@@ -18,12 +19,14 @@ export class BlockTransactionHandler {
     private blockProcessor: IBlockProcessorService | null = null;
     private txProcessor: ITransactionProcessorService | null = null;
     private rpcClient: any | null = null;
+    private bsnIntegration: BSNIntegrationService;
     
     private readonly MAX_RETRIES = 3;
     private readonly RETRY_DELAY = 2000; // 2 seconds
 
     private constructor() {
         // Private constructor to enforce singleton pattern
+        this.bsnIntegration = BSNIntegrationService.getInstance();
     }
 
     /**
@@ -82,6 +85,17 @@ export class BlockTransactionHandler {
                 logger.debug(`[BlockHandler-Normal] Processed block ${block.height} on ${network} with ${block.numTxs} transactions`);
             }
             
+            // BSN Integration: Process block for BSN-related content
+            if (this.bsnIntegration.isProcessingEnabled()) {
+                try {
+                    await this.bsnIntegration.processBlock(blockData.block || blockData, network);
+                    logger.debug(`[BlockHandler] BSN processing completed for block ${block?.height || 'unknown'}`);
+                } catch (bsnError) {
+                    logger.error(`[BlockHandler] BSN processing failed for block ${block?.height || 'unknown'}:`, bsnError);
+                    // Don't throw - BSN processing shouldn't break main pipeline
+                }
+            }
+            
             // Additional post-processing can be done here
             // For example event subscribers, notifications to other services etc.
             
@@ -114,6 +128,17 @@ export class BlockTransactionHandler {
             
             // Save transaction to database
             await this.txStorage.saveTx(tx, network);
+            
+            // BSN Integration: Process transaction for BSN-related content
+            if (this.bsnIntegration.isProcessingEnabled()) {
+                try {
+                    await this.bsnIntegration.processTransaction(txResult, txHash, height, network);
+                    logger.debug(`[TxHandler] BSN processing completed for tx ${txHash}`);
+                } catch (bsnError) {
+                    logger.error(`[TxHandler] BSN processing failed for tx ${txHash}:`, bsnError);
+                    // Don't throw - BSN processing shouldn't break main pipeline
+                }
+            }
             
         } catch (error) {
             this.logError('[TxHandler] Error processing transaction', error);
