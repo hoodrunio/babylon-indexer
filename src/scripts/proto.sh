@@ -71,6 +71,8 @@ if ! buf export buf.build/cosmos/cosmos-sdk --output "$PROTO_DIR"; then
 fi
 echo "Cosmos SDK protos downloaded to $PROTO_DIR"
 
+# Note: cosmos-proto must be placed AFTER other exports to avoid being overwritten
+
 echo "Downloading CosmWasm protos..."
 if ! buf export buf.build/cosmwasm/wasmd --output "$PROTO_DIR"; then
   echo "Error: Failed to download CosmWasm protos"
@@ -111,6 +113,14 @@ else
   echo "Babylon proto directory already exists, skipping download"
 fi
 
+# Download cosmos-proto (defines custom options like cosmos_proto.field_added_in)
+echo "Downloading cosmos-proto options..."
+if ! buf export buf.build/cosmos/cosmos-proto --output "$PROTO_DIR"; then
+  echo "Error: Failed to download cosmos-proto"
+  exit 1
+fi
+echo "cosmos-proto downloaded to $PROTO_DIR"
+
 # Verify proto files exist
 if [ -z "$(find "$PROTO_DIR" -name "*.proto" 2>/dev/null)" ]; then
   echo "Error: No proto files found in $PROTO_DIR"
@@ -118,7 +128,8 @@ if [ -z "$(find "$PROTO_DIR" -name "*.proto" 2>/dev/null)" ]; then
 fi
 
 # Custom proto compilation options
-PROTOC_GEN_TS_PROTO_OPTS="esModuleInterop=true,forceLong=long,useOptionals=true,useDate=false"
+# useOptionals=true is deprecated; use 'messages' instead
+PROTOC_GEN_TS_PROTO_OPTS="esModuleInterop=true,forceLong=long,useOptionals=messages,useDate=false"
 echo "Using proto compilation options: $PROTOC_GEN_TS_PROTO_OPTS"
 
 # Check if protoc is installed
@@ -154,15 +165,15 @@ fi
 
 # Compile proto files
 echo "Compiling proto files..."
-protoc \
+if ! protoc \
   --plugin="protoc-gen-ts_proto=./node_modules/.bin/protoc-gen-ts_proto" \
   --ts_proto_out="$OUT_DIR" \
   --ts_proto_opt="$PROTOC_GEN_TS_PROTO_OPTS" \
   --proto_path="$PROTO_DIR" \
-  --include_imports \
-  $(find "$PROTO_DIR" -name "*.proto") 2>/dev/null || {
-    echo "Warning: Proto compilation had some issues, but continuing..."
-  }
+  $(find "$PROTO_DIR" -name "*.proto"); then
+  echo "Error: Proto compilation failed"
+  exit 1
+fi
 echo "Proto compilation completed"
 
 # Verify output files were generated
