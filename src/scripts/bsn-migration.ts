@@ -6,6 +6,9 @@
 import mongoose from 'mongoose';
 import { logger } from '../utils/logger';
 import { BSNConsumer, BSNHeader, BSNFinality, BSNIBCPacket } from '../database/models/bsn';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 async function connectToDatabase(): Promise<void> {
     const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/babylon-indexer';
