@@ -52,6 +52,20 @@ export class FinalityProviderService {
         return FinalityProviderService.instance;
     }
 
+    /**
+     * Maps Network enum to BSN-ID for finality provider endpoints
+     */
+    private getBsnId(network: Network): string {
+        switch (network) {
+            case Network.MAINNET:
+                return 'bbn-1';
+            case Network.TESTNET:
+                return 'bbn-test-5';
+            default:
+                throw new Error(`Unknown network: ${network}`);
+        }
+    }
+
     private getNetworkConfig() {
         // Always use our initialized client
         return {
@@ -162,7 +176,8 @@ export class FinalityProviderService {
                 let nextKey = '';
                 
                 do {
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers`);
+                    const bsnId = this.getBsnId(network);
+                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
                     if (nextKey) {
                         url.searchParams.append('pagination.key', nextKey);
                     }
@@ -200,7 +215,8 @@ export class FinalityProviderService {
                 
                 do {
                     const { nodeUrl } = this.getNetworkConfig();
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers`);
+                    const bsnId = this.getBsnId(network);
+                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
                     
                     // Add pagination parameters if we have a next key
                     if (nextKey) {
