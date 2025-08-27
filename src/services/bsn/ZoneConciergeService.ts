@@ -12,6 +12,7 @@ import {
 } from '../../types/bsn/finality';
 import { BabylonClient } from '../../clients/BabylonClient';
 import { CacheService } from '../CacheService';
+import { BSNConsumerService } from './BSNConsumerService';
 import { logger } from '../../utils/logger';
 
 interface CacheEntry<T> {
@@ -24,6 +25,7 @@ export class ZoneConciergeService {
     private babylonClient: BabylonClient;
     private network: Network;
     private cache: CacheService;
+    private bsnConsumerService: BSNConsumerService;
     private revalidationPromises: Map<string, Promise<any>> = new Map();
     
     // Cache TTL values (in seconds)
@@ -39,6 +41,7 @@ export class ZoneConciergeService {
             this.babylonClient = BabylonClient.getInstance();
             this.network = this.babylonClient.getNetwork();
             this.cache = CacheService.getInstance();
+            this.bsnConsumerService = BSNConsumerService.getInstance();
             logger.info(`[ZoneConciergeService] Client initialized successfully for network: ${this.network}`);
         } catch (error) {
             logger.error('[ZoneConciergeService] Failed to initialize BabylonClient:', error);
@@ -244,16 +247,85 @@ export class ZoneConciergeService {
                     };
                 }
 
-                // If no specific consumer IDs, we need to get all consumers first
-                // This would require integration with BSNConsumerService
-                logger.warn('[ZoneConciergeService] Getting all finalized BSNs without consumer IDs not yet implemented');
-                return {
-                    data: [],
-                    pagination: {
-                        total: 0,
-                        hasMore: false
+                // If no specific consumer IDs, get all registered consumers first
+                logger.debug('[ZoneConciergeService] Fetching all registered consumers to get their finalized BSN data');
+                
+                try {
+                    // Get all registered consumers
+                    const consumersResponse = await this.bsnConsumerService.getConsumerRegistryList({
+                        limit: 100  // Get up to 100 consumers at once
+                    }, network);
+                    
+                    if (consumersResponse.consumers.length === 0) {
+                        logger.info('[ZoneConciergeService] No registered consumers found');
+                        return {
+                            data: [],
+                            pagination: {
+                                total: 0,
+                                hasMore: false
+                            }
+                        };
                     }
-                };
+                    
+                    // Extract consumer IDs from the registry response
+                    const allConsumerIds = consumersResponse.consumers.map(consumer => consumer.consumer_id);
+                    logger.debug(`[ZoneConciergeService] Found ${allConsumerIds.length} registered consumers: ${allConsumerIds.join(', ')}`);
+                    
+                    // Fetch finalized BSN data for all consumers
+                    const allFinalizedData: FinalizedBSNData[] = [];
+                    
+                    // Process consumers in batches to avoid overwhelming the API
+                    const batchSize = 5;
+                    for (let i = 0; i < allConsumerIds.length; i += batchSize) {
+                        const batch = allConsumerIds.slice(i, i + batchSize);
+                        logger.debug(`[ZoneConciergeService] Processing batch ${Math.floor(i / batchSize) + 1}: ${batch.join(', ')}`);
+                        
+                        // Fetch each consumer's finalized data individually
+                        const batchPromises = batch.map(async (consumerId) => {
+                            try {
+                                const result = await this.getFinalizedBSNInfo(consumerId, query.prove || false, network);
+                                return result;
+                            } catch (error) {
+                                logger.warn(`[ZoneConciergeService] Failed to get finalized BSN data for ${consumerId}:`, error);
+                                return null;
+                            }
+                        });
+                        
+                        const batchResults = await Promise.all(batchPromises);
+                        
+                        // Add valid results to the final data
+                        batchResults.forEach(result => {
+                            if (result) {
+                                allFinalizedData.push(result);
+                            }
+                        });
+                    }
+                    
+                    logger.info(`[ZoneConciergeService] Successfully retrieved finalized data for ${allFinalizedData.length}/${allConsumerIds.length} consumers`);
+                    
+                    // Apply pagination to the combined results
+                    const startIndex = query.offset || 0;
+                    const endIndex = startIndex + (query.limit || 50);
+                    const paginatedData = allFinalizedData.slice(startIndex, endIndex);
+                    
+                    return {
+                        data: paginatedData,
+                        pagination: {
+                            total: allFinalizedData.length,
+                            hasMore: endIndex < allFinalizedData.length
+                        }
+                    };
+                    
+                } catch (error) {
+                    logger.error('[ZoneConciergeService] Error fetching all finalized BSNs:', error);
+                    return {
+                        data: [],
+                        pagination: {
+                            total: 0,
+                            hasMore: false
+                        }
+                    };
+                }
             }
         );
     }
