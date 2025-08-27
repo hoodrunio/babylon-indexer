@@ -23,8 +23,8 @@ export interface ConsumerRegister extends BSNBase {
   consumer_description: string;
   consumer_type: ConsumerType;
   babylon_rewards_commission: string;
-  cosmos_metadata?: CosmosConsumerMetadata;
-  rollup_metadata?: RollupConsumerMetadata;
+  cosmos_channel_id?: string;
+  rollup_finality_contract_address?: string;
   is_active: boolean;
   registration_height: number;
   registration_tx_hash: string;
