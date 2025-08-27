@@ -185,6 +185,14 @@ export class ZoneConciergeService {
                 
                 if (!response.ok) {
                     const errorText = await response.text();
+                    
+                    // Check if this is a "BSN not registered" error (expected behavior)
+                    if (response.status === 400 && errorText.includes('is not registered: no consumer info exists')) {
+                        logger.debug(`[ZoneConciergeService] BSN not registered (expected): ${errorText}`);
+                        throw new Error(`BSN_NOT_REGISTERED: ${errorText}`);
+                    }
+                    
+                    // This is a real error
                     logger.error(`[ZoneConciergeService] HTTP ${response.status} error for ${url.toString()}: ${errorText}`);
                     throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
                 }
@@ -207,6 +215,13 @@ export class ZoneConciergeService {
             const results = await this.getFinalizedBSNsInfo([consumerId], prove, network);
             return results.length > 0 ? results[0] : null;
         } catch (error) {
+            // Check if this is a "BSN not registered" error (expected behavior)
+            if (error instanceof Error && error.message.startsWith('BSN_NOT_REGISTERED:')) {
+                logger.debug(`BSN ${consumerId} is not registered at current epoch (expected behavior)`);
+                return null;
+            }
+            
+            // This is a real error
             logger.error(`Error fetching finalized BSN info for ${consumerId}:`, error);
             return null;
         }
@@ -286,6 +301,13 @@ export class ZoneConciergeService {
                                 const result = await this.getFinalizedBSNInfo(consumerId, query.prove || false, network);
                                 return result;
                             } catch (error) {
+                                // Check if this is a "BSN not registered" error (expected behavior)
+                                if (error instanceof Error && error.message.startsWith('BSN_NOT_REGISTERED:')) {
+                                    logger.debug(`[ZoneConciergeService] BSN ${consumerId} not registered at current epoch (expected)`);
+                                    return null;
+                                }
+                                
+                                // This is a real error
                                 logger.warn(`[ZoneConciergeService] Failed to get finalized BSN data for ${consumerId}:`, error);
                                 return null;
                             }
