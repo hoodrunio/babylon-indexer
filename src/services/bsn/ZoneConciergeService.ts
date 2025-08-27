@@ -171,18 +171,19 @@ export class ZoneConciergeService {
                 const { nodeUrl } = this.getNetworkConfig();
                 const url = new URL(`${nodeUrl}/babylon/zoneconcierge/v1/finalized_bsns_info`);
                 
-                // Add consumer IDs as query parameters
-                consumerIds.forEach(id => {
-                    url.searchParams.append('consumer_ids', id);
-                });
+                // Add consumer IDs as a single comma-separated parameter
+                url.searchParams.append('consumer_ids', consumerIds.join(','));
                 
                 // Add proof parameter
                 url.searchParams.append('prove', prove.toString());
 
+                logger.debug(`[ZoneConciergeService] Requesting URL: ${url.toString()}`);
                 const response = await fetch(url.toString());
                 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    const errorText = await response.text();
+                    logger.error(`[ZoneConciergeService] HTTP ${response.status} error for ${url.toString()}: ${errorText}`);
+                    throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
                 }
 
                 const data = await response.json() as { finalized_bsns_data?: FinalizedBSNData[] };
@@ -286,7 +287,7 @@ export class ZoneConciergeService {
     ): Promise<boolean> {
         try {
             const finalizedData = await this.getFinalizedBSNInfo(consumerId, false, network);
-            return finalizedData !== null && finalizedData.is_verified;
+            return finalizedData !== null && (finalizedData.is_verified ?? false);
         } catch (error) {
             logger.error(`Error checking BSN finalization for ${consumerId}:`, error);
             return false;
@@ -346,9 +347,9 @@ export class ZoneConciergeService {
                     // Update with actual finalization data
                     finalizedData.forEach(data => {
                         status[data.consumer_id] = {
-                            isFinalized: data.is_verified,
+                            isFinalized: data.is_verified ?? false,
                             latestEpoch: data.epoch_info.epoch_number,
-                            lastFinalizationTime: data.finalization_time
+                            lastFinalizationTime: data.finalization_time ?? null
                         };
                     });
 

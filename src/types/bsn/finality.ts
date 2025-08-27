@@ -12,9 +12,9 @@ export interface FinalizedBSNData extends BSNBase {
   epoch_info: EpochInfo;
   raw_checkpoint: RawCheckpoint;
   btc_submission_key: SubmissionKey;
-  proof?: ProofFinalizedHeader;
-  finalization_time: Date;
-  is_verified: boolean;
+  proof?: ProofFinalizedHeader | null;
+  finalization_time?: Date;
+  is_verified?: boolean;
 }
 
 // Epoch information
