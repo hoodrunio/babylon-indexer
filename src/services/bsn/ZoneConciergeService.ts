@@ -440,10 +440,28 @@ export class ZoneConciergeService {
 
                     // Update with actual finalization data
                     finalizedData.forEach(data => {
+                        // If we have finalized data returned, the BSN is considered finalized
+                        const isFinalized = data.epoch_info && data.epoch_info.epoch_number > 0;
+                        
+                        // Parse finalization time if available
+                        let lastFinalizationTime: Date | null = null;
+                        if (data.finalization_time) {
+                            try {
+                                lastFinalizationTime = new Date(data.finalization_time);
+                                // Check if the date is valid
+                                if (isNaN(lastFinalizationTime.getTime())) {
+                                    lastFinalizationTime = null;
+                                }
+                            } catch (error) {
+                                logger.debug(`Invalid finalization time format for consumer ${data.consumer_id}: ${data.finalization_time}`);
+                                lastFinalizationTime = null;
+                            }
+                        }
+                        
                         status[data.consumer_id] = {
-                            isFinalized: data.is_verified ?? false,
-                            latestEpoch: data.epoch_info.epoch_number,
-                            lastFinalizationTime: data.finalization_time ?? null
+                            isFinalized,
+                            latestEpoch: data.epoch_info?.epoch_number || null,
+                            lastFinalizationTime
                         };
                     });
 
@@ -478,9 +496,50 @@ export class ZoneConciergeService {
             this.CACHE_TTL.EPOCH_INFO,
             async () => {
                 try {
-                    // This would typically come from a Babylon epoching endpoint
-                    // For now, we'll implement this when the endpoint is available
-                    logger.info('[ZoneConciergeService] Current epoch info endpoint not yet implemented');
+                    const { nodeUrl } = this.getNetworkConfig();
+                    
+                    // Try to get current epoch from epoching module
+                    const response = await fetch(`${nodeUrl}/babylon/epoching/v1/current_epoch`);
+                    
+                    if (response.ok) {
+                        const data = await response.json() as {
+                            current_epoch?: number;
+                            epoch_interval?: number;
+                            first_block_height?: number;
+                        };
+                        
+                        return {
+                            epoch_number: data.current_epoch || 0,
+                            current_epoch_interval: data.epoch_interval || 360,
+                            first_block_height: data.first_block_height || 0
+                        };
+                    }
+                    
+                    // If epoching endpoint not available, try to get from any finalized BSN data
+                    logger.debug('[ZoneConciergeService] Epoching endpoint not available, trying to get epoch from finalized BSN data');
+                    
+                    // Get all consumers and try to find epoch info from their finalized data
+                    const consumersResponse = await this.bsnConsumerService.getConsumerRegistryList({
+                        limit: 10
+                    }, network);
+                    
+                    for (const consumer of consumersResponse.consumers) {
+                        try {
+                            const finalizedData = await this.getFinalizedBSNInfo(consumer.consumer_id, false, network);
+                            if (finalizedData?.epoch_info) {
+                                return {
+                                    epoch_number: parseInt(finalizedData.epoch_info.epoch_number.toString()),
+                                    current_epoch_interval: finalizedData.epoch_info.current_epoch_interval,
+                                    first_block_height: finalizedData.epoch_info.first_block_height
+                                };
+                            }
+                        } catch (error) {
+                            // Continue to next consumer
+                            continue;
+                        }
+                    }
+                    
+                    logger.warn('[ZoneConciergeService] Could not determine current epoch info from any source');
                     return null;
                 } catch (error) {
                     logger.error('Error getting current epoch info:', error);

@@ -328,19 +328,29 @@ export class BSNConsumerService {
                 const data = await response.json() as { consumer_registers?: ConsumerRegister[] };
                 const rawConsumers = data.consumer_registers || [];
                 
-                // Transform to response format
-                return rawConsumers.map((consumer: ConsumerRegister) => ({
-                    consumer_id: consumer.consumer_id,
-                    consumer_name: consumer.consumer_name,
-                    consumer_description: consumer.consumer_description,
-                    consumer_type: consumer.consumer_type,
-                    cosmos_channel_id: consumer.cosmos_channel_id,
-                    rollup_finality_contract_address: consumer.rollup_finality_contract_address,
-                    babylon_rewards_commission: consumer.babylon_rewards_commission,
-                    is_active: consumer.is_active,
-                    registration_time: consumer.created_at,
-                    last_activity: consumer.updated_at
-                }));
+                // Transform to response format with computed fields (same logic as getConsumerRegistryList)
+                return await Promise.all(
+                    rawConsumers.map(async (consumer: ConsumerRegister) => {
+                        // Determine consumer type based on channel_id
+                        const consumerType = this.determineConsumerType(consumer);
+                        
+                        // Check activity status using finalized BSN data
+                        const isActive = await this.checkConsumerActivity(consumer.consumer_id, network);
+                        
+                        return {
+                            consumer_id: consumer.consumer_id,
+                            consumer_name: consumer.consumer_name,
+                            consumer_description: consumer.consumer_description,
+                            consumer_type: consumerType,
+                            cosmos_channel_id: consumer.cosmos_channel_id,
+                            rollup_finality_contract_address: consumer.rollup_finality_contract_address,
+                            babylon_rewards_commission: consumer.babylon_rewards_commission,
+                            is_active: isActive,
+                            registration_time: consumer.created_at,
+                            last_activity: consumer.updated_at
+                        };
+                    })
+                );
             }
         );
     }
