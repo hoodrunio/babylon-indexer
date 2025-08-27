@@ -381,7 +381,10 @@ export class ZoneConciergeService {
     ): Promise<boolean> {
         try {
             const finalizedData = await this.getFinalizedBSNInfo(consumerId, false, network);
-            return finalizedData !== null && (finalizedData.is_verified ?? false);
+            // If we have finalized data with valid epoch info, the BSN is considered finalized
+            return finalizedData !== null && 
+                   finalizedData.epoch_info !== undefined && 
+                   finalizedData.epoch_info.epoch_number > 0;
         } catch (error) {
             logger.error(`Error checking BSN finalization for ${consumerId}:`, error);
             return false;
