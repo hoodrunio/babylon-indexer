@@ -46,6 +46,12 @@ export class ZoneConciergeController {
         
         // Get current epoch information
         router.get('/finality/epoch/current', this.getCurrentEpochInfo.bind(this));
+        
+        // Get finality providers for a specific BSN
+        router.get('/finality/bsns/:consumerId/providers', this.getBSNFinalityProviders.bind(this));
+        
+        // Get BSN information with finality providers included
+        router.get('/finality/bsns/:consumerId/with-providers', this.getBSNWithFinalityProviders.bind(this));
     }
 
     /**
@@ -343,6 +349,110 @@ export class ZoneConciergeController {
             });
         } catch (error) {
             logger.error('Error getting current epoch info:', error);
+            return res.status(500).json({
+                error: 'Internal server error',
+                message: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
+     * Get finality providers for a specific BSN
+     */
+    public async getBSNFinalityProviders(req: Request, res: Response): Promise<Response> {
+        try {
+            const { consumerId } = req.params;
+            const network = (req.query.network as Network) || Network.MAINNET;
+            const activeOnly = req.query.active_only === 'true';
+
+            // Validate network parameter
+            if (!Object.values(Network).includes(network)) {
+                return res.status(400).json({
+                    error: 'Invalid network parameter. Must be one of: mainnet, testnet'
+                });
+            }
+
+            if (!consumerId) {
+                return res.status(400).json({
+                    error: 'Consumer ID is required'
+                });
+            }
+
+            const finalityProviders = await this.zoneConciergeService.getBSNFinalityProviders(
+                consumerId,
+                network,
+                activeOnly
+            );
+
+            return res.json({
+                consumer_id: consumerId,
+                finality_providers: finalityProviders,
+                active_only: activeOnly,
+                count: finalityProviders.length,
+                network,
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            logger.error('Error getting BSN finality providers:', error);
+            return res.status(500).json({
+                error: 'Internal server error',
+                message: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
+     * Get BSN information with finality providers included
+     */
+    public async getBSNWithFinalityProviders(req: Request, res: Response): Promise<Response> {
+        try {
+            const { consumerId } = req.params;
+            const network = (req.query.network as Network) || Network.MAINNET;
+            const prove = req.query.prove === 'true';
+            const activeOnly = req.query.active_only === 'true';
+
+            // Validate network parameter
+            if (!Object.values(Network).includes(network)) {
+                return res.status(400).json({
+                    error: 'Invalid network parameter. Must be one of: mainnet, testnet'
+                });
+            }
+
+            if (!consumerId) {
+                return res.status(400).json({
+                    error: 'Consumer ID is required'
+                });
+            }
+
+            // Get BSN info and finality providers separately to allow activeOnly filtering
+            const [bsnInfo, finalityProviders] = await Promise.all([
+                this.zoneConciergeService.getFinalizedBSNInfo(consumerId, prove, network),
+                this.zoneConciergeService.getBSNFinalityProviders(consumerId, network, activeOnly)
+            ]);
+
+            if (!bsnInfo) {
+                return res.status(404).json({
+                    error: 'BSN not found',
+                    message: `No BSN data found for consumer ID: ${consumerId}`
+                });
+            }
+
+            const isFinalized = bsnInfo.epoch_info !== undefined && 
+                              bsnInfo.epoch_info.epoch_number > 0;
+
+            return res.json({
+                consumer_id: consumerId,
+                bsn_info: bsnInfo,
+                finality_providers: finalityProviders,
+                is_finalized: isFinalized,
+                finality_providers_count: finalityProviders.length,
+                active_only: activeOnly,
+                network,
+                prove,
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            logger.error('Error getting BSN with finality providers:', error);
             return res.status(500).json({
                 error: 'Internal server error',
                 message: error instanceof Error ? error.message : 'Unknown error'

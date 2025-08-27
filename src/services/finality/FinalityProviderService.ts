@@ -153,34 +153,45 @@ export class FinalityProviderService {
     }
 
     /**
-     * Get active finality providers for a specific BSN
+     * Get finality providers for a specific BSN
+     * @param bsnId BSN identifier
+     * @param network Network to query
+     * @param activeOnly If true, returns only active finality providers. If false, returns all (active, inactive, jailed)
      */
     public async getActiveFinalityProvidersForBSN(
         bsnId: string, 
-        network: Network = this.network
+        network: Network = this.network,
+        activeOnly: boolean = false
     ): Promise<FinalityProvider[]> {
-        const cacheKey = `fp:active:${bsnId}:${network}`;
+        const cacheKey = `fp:bsn:${bsnId}:${network}:${activeOnly ? 'active' : 'all'}`;
         return this.getWithRevalidate(
             cacheKey,
             this.CACHE_TTL.PROVIDERS_LIST,
             async () => {
                 const { nodeUrl } = this.getNetworkConfig();
                 
-                // 1. First, get the latest block height
-                const currentHeight = await this.babylonClient.getCurrentHeight();
+                let activePkSet: Set<string> = new Set();
                 
-                // 2. Get active FPs from the last block
-                const activeResponse = await fetch(`${nodeUrl}/babylon/finality/v1/finality_providers/${currentHeight}`);
-                if (!activeResponse.ok) {
-                    throw new Error(`HTTP error! status: ${activeResponse.status}`);
+                // If we need to filter by active status, get the active providers first
+                if (activeOnly) {
+                    // 1. Get the latest block height
+                    const currentHeight = await this.babylonClient.getCurrentHeight();
+                    
+                    // 2. Get active FPs from the last block
+                    const activeResponse = await fetch(`${nodeUrl}/babylon/finality/v1/finality_providers/${currentHeight}`);
+                    if (!activeResponse.ok) {
+                        throw new Error(`HTTP error! status: ${activeResponse.status}`);
+                    }
+                    
+                    const activeData = await activeResponse.json() as ActiveProviderResponse;
+                    
+                    // Get public keys of active FPs into a set
+                    activePkSet = new Set(
+                        activeData.finality_providers
+                            .map((fp: FinalityProviderWithMeta) => fp.btc_pk_hex)
+                            .filter((pk): pk is string => pk !== undefined)
+                    );
                 }
-                
-                const activeData = await activeResponse.json() as ActiveProviderResponse;
-                
-                // Get public keys of active FPs into a set
-                const activePkSet = new Set(
-                    activeData.finality_providers.map((fp: FinalityProviderWithMeta) => fp.btc_pk_hex)
-                );
                 
                 // 3. Get detailed information of FPs for specific BSN
                 const allProviders: FinalityProvider[] = [];
@@ -199,15 +210,18 @@ export class FinalityProviderService {
                     
                     const data = await response.json() as QueryFinalityProvidersResponse;
                     
-                    // Filter only active FP details and add BSN ID
-                    const activeProviders = data.finality_providers?.filter(provider => 
-                        activePkSet.has(provider.btc_pk)
-                    ).map(provider => ({
+                    // Filter providers based on activeOnly parameter
+                    const providers = data.finality_providers?.map(provider => ({
                         ...provider,
                         bsn_id: bsnId
-                    })) || [];
+                    })).filter(provider => {
+                        // If activeOnly is false, return all providers
+                        if (!activeOnly) return true;
+                        // If activeOnly is true, only return active providers
+                        return activePkSet.has(provider.btc_pk);
+                    }) || [];
                     
-                    allProviders.push(...activeProviders);
+                    allProviders.push(...providers);
                     
                     nextKey = data.pagination?.next_key || '';
                 } while (nextKey);

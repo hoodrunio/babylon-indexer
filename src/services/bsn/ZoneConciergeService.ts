@@ -13,6 +13,7 @@ import {
 import { BabylonClient } from '../../clients/BabylonClient';
 import { CacheService } from '../CacheService';
 import { BSNConsumerService } from './BSNConsumerService';
+import { FinalityProviderService } from '../finality/FinalityProviderService';
 import { logger } from '../../utils/logger';
 
 interface CacheEntry<T> {
@@ -26,6 +27,7 @@ export class ZoneConciergeService {
     private network: Network;
     private cache: CacheService;
     private bsnConsumerService: BSNConsumerService;
+    private finalityProviderService: FinalityProviderService;
     private revalidationPromises: Map<string, Promise<any>> = new Map();
     
     // Cache TTL values (in seconds)
@@ -33,7 +35,8 @@ export class ZoneConciergeService {
         FINALIZED_BSNS: 300, // 5 minutes
         FINALITY_PARAMS: 600, // 10 minutes
         FINALITY_STATS: 300, // 5 minutes
-        EPOCH_INFO: 180 // 3 minutes
+        EPOCH_INFO: 180, // 3 minutes
+        BSN_FINALITY_PROVIDERS: 300 // 5 minutes
     };
 
     private constructor() {
@@ -42,6 +45,7 @@ export class ZoneConciergeService {
             this.network = this.babylonClient.getNetwork();
             this.cache = CacheService.getInstance();
             this.bsnConsumerService = BSNConsumerService.getInstance();
+            this.finalityProviderService = FinalityProviderService.getInstance();
             logger.info(`[ZoneConciergeService] Client initialized successfully for network: ${this.network}`);
         } catch (error) {
             logger.error('[ZoneConciergeService] Failed to initialize BabylonClient:', error);
@@ -553,4 +557,68 @@ export class ZoneConciergeService {
             }
         );
     }
+
+    /**
+     * Get finality providers for a specific BSN
+     * @param consumerId BSN consumer ID
+     * @param network Network to query
+     * @param activeOnly If true, returns only active finality providers. If false, returns all (active, inactive, jailed)
+     */
+    public async getBSNFinalityProviders(
+        consumerId: string,
+        network: Network = this.network,
+        activeOnly: boolean = false
+    ): Promise<any[]> {
+        const cacheKey = `zoneconcierge:finality-providers:${consumerId}:${network}:${activeOnly ? 'active' : 'all'}`;
+        return this.getWithRevalidate(
+            cacheKey,
+            this.CACHE_TTL.BSN_FINALITY_PROVIDERS,
+            async () => {
+                try {
+                    // Use the existing finality provider service method that accepts BSN ID
+                    const providers = await this.finalityProviderService.getActiveFinalityProvidersForBSN(consumerId, network, activeOnly);
+                    logger.info(`[ZoneConciergeService] Retrieved ${providers.length} ${activeOnly ? 'active' : 'all'} finality providers for BSN ${consumerId}`);
+                    return providers;
+                } catch (error) {
+                    logger.error(`Error getting finality providers for BSN ${consumerId}:`, error);
+                    return [];
+                }
+            }
+        );
+    }
+
+
+    /**
+     * Get BSN information with finality providers included
+     */
+    public async getBSNWithFinalityProviders(
+        consumerId: string,
+        prove: boolean = false,
+        network: Network = this.network
+    ): Promise<{
+        bsnInfo: any;
+        finalityProviders: any[];
+        isFinalized: boolean;
+    } | null> {
+        try {
+            const [bsnInfo, finalityProviders] = await Promise.all([
+                this.getFinalizedBSNInfo(consumerId, prove, network),
+                this.getBSNFinalityProviders(consumerId, network)
+            ]);
+
+            const isFinalized = bsnInfo !== null && 
+                               bsnInfo.epoch_info !== undefined && 
+                               bsnInfo.epoch_info.epoch_number > 0;
+
+            return {
+                bsnInfo,
+                finalityProviders,
+                isFinalized
+            };
+        } catch (error) {
+            logger.error(`Error getting BSN with finality providers for ${consumerId}:`, error);
+            return null;
+        }
+    }
+
 }
