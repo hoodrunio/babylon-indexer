@@ -443,17 +443,23 @@ export class ZoneConciergeService {
                         // If we have finalized data returned, the BSN is considered finalized
                         const isFinalized = data.epoch_info && data.epoch_info.epoch_number > 0;
                         
-                        // Parse finalization time if available
+                        // Parse finalization time from available fields
                         let lastFinalizationTime: Date | null = null;
-                        if (data.finalization_time) {
+                        
+                        // Try to get finalization time from multiple sources
+                        const timeSource = data.finalization_time || 
+                                         data.latest_finalized_header?.time || 
+                                         data.epoch_info?.last_block_time;
+                        
+                        if (timeSource) {
                             try {
-                                lastFinalizationTime = new Date(data.finalization_time);
+                                lastFinalizationTime = new Date(timeSource);
                                 // Check if the date is valid
                                 if (isNaN(lastFinalizationTime.getTime())) {
                                     lastFinalizationTime = null;
                                 }
                             } catch (error) {
-                                logger.debug(`Invalid finalization time format for consumer ${data.consumer_id}: ${data.finalization_time}`);
+                                logger.debug(`Invalid finalization time format for consumer ${data.consumer_id}: ${timeSource}`);
                                 lastFinalizationTime = null;
                             }
                         }

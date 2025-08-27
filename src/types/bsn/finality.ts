@@ -23,8 +23,11 @@ export interface EpochInfo {
   current_epoch_interval: number;
   first_block_height: number;
   last_block_height?: number;
+  last_block_time?: string;
   app_hash_root?: string;
   sealer_header?: SealerHeader;
+  sealer_app_hash?: string;
+  sealer_block_hash?: string;
 }
 
 // Raw checkpoint data
