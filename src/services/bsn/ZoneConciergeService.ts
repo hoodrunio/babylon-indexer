@@ -497,7 +497,6 @@ export class ZoneConciergeService {
     public async getCurrentEpochInfo(network: Network = this.network): Promise<{
         epoch_number: number;
         current_epoch_interval: number;
-        first_block_height: number;
     } | null> {
         const cacheKey = `zoneconcierge:current-epoch:${network}`;
         return this.getWithRevalidate(
@@ -514,13 +513,11 @@ export class ZoneConciergeService {
                         const data = await response.json() as {
                             current_epoch?: number;
                             epoch_interval?: number;
-                            first_block_height?: number;
                         };
                         
                         return {
                             epoch_number: data.current_epoch || 0,
                             current_epoch_interval: data.epoch_interval || 360,
-                            first_block_height: data.first_block_height || 0
                         };
                     }
                     
@@ -539,7 +536,6 @@ export class ZoneConciergeService {
                                 return {
                                     epoch_number: parseInt(finalizedData.epoch_info.epoch_number.toString()),
                                     current_epoch_interval: finalizedData.epoch_info.current_epoch_interval,
-                                    first_block_height: finalizedData.epoch_info.first_block_height
                                 };
                             }
                         } catch (error) {
