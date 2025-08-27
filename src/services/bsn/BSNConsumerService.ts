@@ -3,7 +3,7 @@
  * Handles BSN consumer registry endpoints and caching
  */
 
-import { Network } from '../../types/bsn';
+import { Network, ConsumerType } from '../../types/bsn';
 import { 
     ConsumerRegisterResponse, 
     BSNConsumerParams,
@@ -13,6 +13,7 @@ import {
 } from '../../types/bsn/consumer';
 import { BabylonClient } from '../../clients/BabylonClient';
 import { CacheService } from '../CacheService';
+import { ZoneConciergeService } from './ZoneConciergeService';
 import { logger } from '../../utils/logger';
 
 interface CacheEntry<T> {
@@ -135,6 +136,48 @@ export class BSNConsumerService {
     }
 
     /**
+     * Determine consumer type based on channel_id
+     * If channel_id is empty -> ROLLUP, otherwise -> COSMOS
+     */
+    private determineConsumerType(consumer: ConsumerRegister): ConsumerType {
+        if (consumer.cosmos_channel_id && consumer.cosmos_channel_id.trim() !== '') {
+            return ConsumerType.COSMOS;
+        }
+        return ConsumerType.ROLLUP;
+    }
+
+    /**
+     * Check if consumer is active by testing if it has finalized BSN data
+     */
+    private async checkConsumerActivity(consumerId: string, network: Network): Promise<boolean> {
+        try {
+            // We'll need to get ZoneConciergeService instance, but avoid circular dependency
+            // For now, we'll make a direct API call to check finality
+            const { nodeUrl } = this.getNetworkConfig();
+            const url = new URL(`${nodeUrl}/babylon/zoneconcierge/v1/finalized_bsns_info`);
+            url.searchParams.append('consumer_ids', consumerId);
+            url.searchParams.append('prove', 'false');
+
+            const response = await fetch(url.toString());
+            
+            if (response.status === 400) {
+                // BSN not registered or no finalized data = inactive
+                return false;
+            }
+            
+            if (response.ok) {
+                const data = await response.json() as { finalized_bsns_data?: any[] };
+                return !!(data.finalized_bsns_data && data.finalized_bsns_data.length > 0);
+            }
+            
+            return false;
+        } catch (error) {
+            logger.debug(`[BSNConsumerService] Could not check activity for ${consumerId}:`, error);
+            return false;
+        }
+    }
+
+    /**
      * Get BSN consumer parameters
      */
     public async getConsumerParams(network: Network = this.network): Promise<BSNConsumerParams> {
@@ -197,19 +240,29 @@ export class BSNConsumerService {
                 };
                 const rawConsumers = data.consumer_registers || [];
                 
-                // Transform to response format
-                const consumers: ConsumerRegisterResponse[] = rawConsumers.map((consumer: ConsumerRegister) => ({
-                    consumer_id: consumer.consumer_id,
-                    consumer_name: consumer.consumer_name,
-                    consumer_description: consumer.consumer_description,
-                    consumer_type: consumer.consumer_type,
-                    cosmos_channel_id: consumer.cosmos_channel_id,
-                    rollup_finality_contract_address: consumer.rollup_finality_contract_address,
-                    babylon_rewards_commission: consumer.babylon_rewards_commission,
-                    is_active: consumer.is_active,
-                    registration_time: consumer.created_at,
-                    last_activity: consumer.updated_at
-                }));
+                // Transform to response format with async activity checks
+                const consumers: ConsumerRegisterResponse[] = await Promise.all(
+                    rawConsumers.map(async (consumer: ConsumerRegister) => {
+                        // Determine consumer type based on channel_id
+                        const consumerType = this.determineConsumerType(consumer);
+                        
+                        // Check activity status using finalized BSN data
+                        const isActive = await this.checkConsumerActivity(consumer.consumer_id, network);
+                        
+                        return {
+                            consumer_id: consumer.consumer_id,
+                            consumer_name: consumer.consumer_name,
+                            consumer_description: consumer.consumer_description,
+                            consumer_type: consumerType,
+                            cosmos_channel_id: consumer.cosmos_channel_id,
+                            rollup_finality_contract_address: consumer.rollup_finality_contract_address,
+                            babylon_rewards_commission: consumer.babylon_rewards_commission,
+                            is_active: isActive,
+                            registration_time: consumer.created_at,
+                            last_activity: consumer.updated_at
+                        };
+                    })
+                );
                 
                 // Apply client-side filtering if needed
                 let filteredConsumers = consumers;
