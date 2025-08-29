@@ -4,6 +4,7 @@
  */
 
 import { ZoneConciergeService } from '../../../services/bsn/ZoneConciergeService';
+import { BSNSignatureService } from '../../../services/bsn/BSNSignatureService';
 import { Network } from '../../../types/bsn';
 import { FinalityQuery } from '../../../types/bsn/finality';
 import { Router, Request, Response } from 'express';
@@ -12,9 +13,11 @@ import { logger } from '../../../utils/logger';
 export class ZoneConciergeController {
     private static instance: ZoneConciergeController | null = null;
     private zoneConciergeService: ZoneConciergeService;
+    private bsnSignatureService: BSNSignatureService;
 
     private constructor() {
         this.zoneConciergeService = ZoneConciergeService.getInstance();
+        this.bsnSignatureService = BSNSignatureService.getInstance();
     }
 
     public static getInstance(): ZoneConciergeController {
@@ -52,6 +55,16 @@ export class ZoneConciergeController {
         
         // Get BSN information with finality providers included
         router.get('/finality/bsns/:consumerId/with-providers', this.getBSNWithFinalityProviders.bind(this));
+        
+        // FP signature endpoints
+        // Get detailed block signature status for a specific FP (last N blocks)
+        router.get('/finality/bsns/:consumerId/providers/:fpPubkeyHex/blocks', this.getFPBlockSignatures.bind(this));
+        
+        // Get signature statistics for a specific FP (last N blocks)
+        router.get('/finality/bsns/:consumerId/providers/:fpPubkeyHex/stats', this.getFPSignatureStats.bind(this));
+        
+        // Get signature statistics for all FPs in a consumer (last N blocks)
+        router.get('/finality/bsns/:consumerId/providers/stats', this.getAllFPSignatureStats.bind(this));
     }
 
     /**
@@ -453,6 +466,237 @@ export class ZoneConciergeController {
             });
         } catch (error) {
             logger.error('Error getting BSN with finality providers:', error);
+            return res.status(500).json({
+                error: 'Internal server error',
+                message: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
+     * Get detailed block signature status for a specific FP (last N blocks)
+     */
+    public async getFPBlockSignatures(req: Request, res: Response): Promise<Response> {
+        try {
+            const { consumerId, fpPubkeyHex } = req.params;
+            const network = (req.query.network as Network) || Network.MAINNET;
+            const blockCount = parseInt(req.query.blocks as string) || 100;
+
+            // Validate network parameter
+            if (!Object.values(Network).includes(network)) {
+                return res.status(400).json({
+                    error: 'Invalid network parameter. Must be one of: mainnet, testnet'
+                });
+            }
+
+            if (!consumerId || !fpPubkeyHex) {
+                return res.status(400).json({
+                    error: 'Consumer ID and FP public key are required'
+                });
+            }
+
+            // Validate block count
+            if (blockCount < 1 || blockCount > 1000) {
+                return res.status(400).json({
+                    error: 'Invalid blocks parameter. Must be between 1 and 1000'
+                });
+            }
+
+            const blockSignatures = await this.bsnSignatureService.getFPBlockSignatureStatus(
+                fpPubkeyHex,
+                consumerId,
+                network,
+                blockCount
+            );
+
+            const signedCount = blockSignatures.filter(b => b.signed).length;
+            const missedCount = blockSignatures.length - signedCount;
+            const signaturePercentage = blockSignatures.length > 0 
+                ? Math.round((signedCount / blockSignatures.length) * 10000) / 100 
+                : 0;
+
+            return res.json({
+                consumer_id: consumerId,
+                fp_pubkey_hex: fpPubkeyHex,
+                block_count: blockCount,
+                block_signatures: blockSignatures,
+                summary: {
+                    total_blocks: blockSignatures.length,
+                    signed_blocks: signedCount,
+                    missed_blocks: missedCount,
+                    signature_percentage: signaturePercentage
+                },
+                network,
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            logger.error('Error getting FP block signatures:', error);
+            return res.status(500).json({
+                error: 'Internal server error',
+                message: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
+     * Get signature statistics for a specific FP (last N blocks)
+     */
+    public async getFPSignatureStats(req: Request, res: Response): Promise<Response> {
+        try {
+            const { consumerId, fpPubkeyHex } = req.params;
+            const network = (req.query.network as Network) || Network.MAINNET;
+            const blockCount = parseInt(req.query.blocks as string) || 10000;
+
+            // Validate network parameter
+            if (!Object.values(Network).includes(network)) {
+                return res.status(400).json({
+                    error: 'Invalid network parameter. Must be one of: mainnet, testnet'
+                });
+            }
+
+            if (!consumerId || !fpPubkeyHex) {
+                return res.status(400).json({
+                    error: 'Consumer ID and FP public key are required'
+                });
+            }
+
+            // Validate block count
+            if (blockCount < 1 || blockCount > 100000) {
+                return res.status(400).json({
+                    error: 'Invalid blocks parameter. Must be between 1 and 100000'
+                });
+            }
+
+            const statistics = await this.bsnSignatureService.getFPSignatureStatistics(
+                fpPubkeyHex,
+                consumerId,
+                network,
+                blockCount
+            );
+
+            if (!statistics) {
+                return res.status(404).json({
+                    error: 'FP signature statistics not found',
+                    message: `No signature data found for FP ${fpPubkeyHex} in consumer ${consumerId}`
+                });
+            }
+
+            return res.json({
+                consumer_id: consumerId,
+                fp_pubkey_hex: fpPubkeyHex,
+                block_count: blockCount,
+                statistics,
+                network,
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            logger.error('Error getting FP signature statistics:', error);
+            return res.status(500).json({
+                error: 'Internal server error',
+                message: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }
+
+    /**
+     * Get signature statistics for all FPs in a consumer (last N blocks)
+     */
+    public async getAllFPSignatureStats(req: Request, res: Response): Promise<Response> {
+        try {
+            const { consumerId } = req.params;
+            const network = (req.query.network as Network) || Network.MAINNET;
+            const blockCount = parseInt(req.query.blocks as string) || 10000;
+            const sortBy = (req.query.sort as string) || 'percentage'; // percentage, signed, missed
+            const order = (req.query.order as string) || 'desc'; // asc, desc
+
+            // Validate network parameter
+            if (!Object.values(Network).includes(network)) {
+                return res.status(400).json({
+                    error: 'Invalid network parameter. Must be one of: mainnet, testnet'
+                });
+            }
+
+            if (!consumerId) {
+                return res.status(400).json({
+                    error: 'Consumer ID is required'
+                });
+            }
+
+            // Validate block count
+            if (blockCount < 1 || blockCount > 100000) {
+                return res.status(400).json({
+                    error: 'Invalid blocks parameter. Must be between 1 and 100000'
+                });
+            }
+
+            // Validate sort parameters
+            if (!['percentage', 'signed', 'missed'].includes(sortBy)) {
+                return res.status(400).json({
+                    error: 'Invalid sort parameter. Must be one of: percentage, signed, missed'
+                });
+            }
+
+            if (!['asc', 'desc'].includes(order)) {
+                return res.status(400).json({
+                    error: 'Invalid order parameter. Must be one of: asc, desc'
+                });
+            }
+
+            let statistics = await this.bsnSignatureService.getAllFPSignatureStatistics(
+                consumerId,
+                network,
+                blockCount
+            );
+
+            // Apply sorting
+            if (sortBy === 'percentage') {
+                statistics.sort((a, b) => order === 'desc' 
+                    ? b.signature_percentage - a.signature_percentage
+                    : a.signature_percentage - b.signature_percentage);
+            } else if (sortBy === 'signed') {
+                statistics.sort((a, b) => order === 'desc'
+                    ? b.signed_blocks - a.signed_blocks
+                    : a.signed_blocks - b.signed_blocks);
+            } else if (sortBy === 'missed') {
+                statistics.sort((a, b) => order === 'desc'
+                    ? b.missed_blocks - a.missed_blocks
+                    : a.missed_blocks - b.missed_blocks);
+            }
+
+            // Calculate overall statistics
+            const totalFPs = statistics.length;
+            const avgSignaturePercentage = totalFPs > 0
+                ? statistics.reduce((sum, stat) => sum + stat.signature_percentage, 0) / totalFPs
+                : 0;
+
+            const bestPerformer = statistics.length > 0 ? statistics[0] : null;
+            const worstPerformer = statistics.length > 0 
+                ? statistics.reduce((worst, current) => 
+                    current.signature_percentage < worst.signature_percentage ? current : worst)
+                : null;
+
+            return res.json({
+                consumer_id: consumerId,
+                block_count: blockCount,
+                total_fps: totalFPs,
+                sort: { by: sortBy, order },
+                overall_stats: {
+                    average_signature_percentage: Math.round(avgSignaturePercentage * 100) / 100,
+                    best_performer: bestPerformer ? {
+                        fp_pubkey_hex: bestPerformer.fp_pubkey_hex,
+                        signature_percentage: bestPerformer.signature_percentage
+                    } : null,
+                    worst_performer: worstPerformer ? {
+                        fp_pubkey_hex: worstPerformer.fp_pubkey_hex,
+                        signature_percentage: worstPerformer.signature_percentage
+                    } : null
+                },
+                fp_statistics: statistics,
+                network,
+                timestamp: Date.now()
+            });
+        } catch (error) {
+            logger.error('Error getting all FP signature statistics:', error);
             return res.status(500).json({
                 error: 'Internal server error',
                 message: error instanceof Error ? error.message : 'Unknown error'
