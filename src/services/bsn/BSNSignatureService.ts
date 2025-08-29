@@ -336,7 +336,7 @@ export class BSNSignatureService {
   }
 
   /**
-   * Get detailed block-by-block signature status for FP (last N blocks)
+   * Get detailed block-by-block signature status for FP (last N active blocks)
    */
   async getFPBlockSignatureStatus(
     fpPubkeyHex: string,
@@ -345,41 +345,97 @@ export class BSNSignatureService {
     blockCount: number = 100
   ): Promise<{ block_height: number; signed: boolean; tx_hash?: string }[]> {
     try {
-      // Get latest signature height for this consumer
-      const latestHeight = await this.getLatestSignatureHeight(network, consumerId);
-      if (latestHeight === 0) {
+      // Get last N active blocks (blocks that had signatures from ANY FP)
+      const lastActiveBlocks = await BSNSignature.aggregate([
+        {
+          $match: {
+            consumer_id: consumerId,
+            network: network
+          }
+        },
+        {
+          $group: {
+            _id: '$block_height'
+          }
+        },
+        {
+          $sort: { _id: -1 }
+        },
+        {
+          $limit: blockCount
+        }
+      ]);
+
+      if (lastActiveBlocks.length === 0) {
         return [];
       }
 
-      const fromHeight = Math.max(1, latestHeight - blockCount + 1);
-      
-      // Get all signatures from this FP in the range
-      const signatures = await BSNSignature.find({
+      const activeBlockHeights = lastActiveBlocks.map(block => block._id as number);
+      const minHeight = Math.min(...activeBlockHeights);
+      const maxHeight = Math.max(...activeBlockHeights);
+
+      // Get this FP's OVERALL signature info to check if FP was active during this period
+      const fpOverallData = await BSNSignature.aggregate([
+        {
+          $match: {
+            fp_btc_pk_hex: fpPubkeyHex,
+            consumer_id: consumerId,
+            network: network
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            first_signature_height: { $min: '$block_height' },
+            last_signature_height: { $max: '$block_height' }
+          }
+        }
+      ]);
+
+      if (!fpOverallData[0]) {
+        // FP has no signatures, return all active blocks as missed
+        return activeBlockHeights.map(height => ({
+          block_height: height,
+          signed: false
+        })).sort((a, b) => b.block_height - a.block_height);
+      }
+
+      const fpData = fpOverallData[0];
+      const firstSignatureHeight = fpData.first_signature_height;
+      const lastSignatureHeight = fpData.last_signature_height;
+
+      // Filter active blocks to only those within FP's active period
+      const relevantBlocks = activeBlockHeights.filter(height => 
+        height >= firstSignatureHeight && height <= lastSignatureHeight
+      );
+
+      // Get this FP's signatures in the relevant blocks
+      const fpSignatures = await BSNSignature.find({
         fp_btc_pk_hex: fpPubkeyHex,
         consumer_id: consumerId,
         network: network,
-        block_height: { $gte: fromHeight, $lte: latestHeight }
+        block_height: { $in: relevantBlocks }
       })
       .select('block_height tx_hash')
       .lean();
 
-      // Create a map of signed blocks
-      const signedBlocks = new Map(
-        signatures.map(sig => [sig.block_height, sig.tx_hash])
+      // Create a map of this FP's signed blocks
+      const fpSignedBlocks = new Map(
+        fpSignatures.map(sig => [sig.block_height, sig.tx_hash])
       );
 
-      // Build result array for all blocks in range
-      const result: { block_height: number; signed: boolean; tx_hash?: string }[] = [];
-      for (let height = fromHeight; height <= latestHeight; height++) {
-        const txHash = signedBlocks.get(height);
-        result.push({
-          block_height: height,
-          signed: !!txHash,
-          tx_hash: txHash
-        });
-      }
+      // Build result array for relevant active blocks only
+      const result: { block_height: number; signed: boolean; tx_hash?: string }[] = 
+        relevantBlocks.map(blockHeight => {
+          const txHash = fpSignedBlocks.get(blockHeight) as string | undefined;
+          return {
+            block_height: blockHeight,
+            signed: !!txHash,
+            tx_hash: txHash
+          };
+        }).sort((a, b) => b.block_height - a.block_height);
 
-      return result.sort((a, b) => b.block_height - a.block_height); // Latest first
+      return result;
     } catch (error) {
       logger.error(`[BSNSignatureService] Error getting FP block signature status:`, error);
       return [];
@@ -387,7 +443,7 @@ export class BSNSignatureService {
   }
 
   /**
-   * Get aggregate signature statistics for FP (last N blocks)
+   * Get aggregate signature statistics for FP (last N active blocks)
    */
   async getFPSignatureStatistics(
     fpPubkeyHex: string,
@@ -407,62 +463,12 @@ export class BSNSignatureService {
     last_signature_time?: Date;
   } | null> {
     try {
-      // Get latest signature height for this consumer
-      const latestHeight = await this.getLatestSignatureHeight(network, consumerId);
-      if (latestHeight === 0) {
-        return null;
-      }
-
-      const fromHeight = Math.max(1, latestHeight - blockCount + 1);
-
-      // Get signature count and signature info for this FP in the range
-      const signatureData = await BSNSignature.aggregate([
-        {
-          $match: {
-            fp_btc_pk_hex: fpPubkeyHex,
-            consumer_id: consumerId,
-            network: network,
-            block_height: { $gte: fromHeight, $lte: latestHeight }
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            signed_blocks: { $sum: 1 },
-            first_signature_height: { $min: '$block_height' },
-            last_signature_height: { $max: '$block_height' },
-            last_signature_time: { $max: '$signed_at' }
-          }
-        }
-      ]);
-
-      const stats = signatureData[0];
-      const signedBlocks = stats?.signed_blocks || 0;
-
-      if (signedBlocks === 0) {
-        return {
-          fp_pubkey_hex: fpPubkeyHex,
-          consumer_id: consumerId,
-          active_blocks: 0,
-          signed_blocks: 0,
-          missed_blocks: 0,
-          signature_percentage: 0,
-          block_range: { from: fromHeight, to: latestHeight }
-        };
-      }
-
-      // Calculate active period: from first signature to latest signature
-      const firstSignatureHeight = stats.first_signature_height;
-      const lastSignatureHeight = stats.last_signature_height;
-      const activeBlocks = lastSignatureHeight - firstSignatureHeight + 1;
-
-      // Get blocks in active period that had signatures from ANY FP to determine required signing blocks
-      const activeSigningBlocks = await BSNSignature.aggregate([
+      // Get last N active blocks (blocks that had signatures from ANY FP)
+      const lastActiveBlocks = await BSNSignature.aggregate([
         {
           $match: {
             consumer_id: consumerId,
-            network: network,
-            block_height: { $gte: firstSignatureHeight, $lte: lastSignatureHeight }
+            network: network
           }
         },
         {
@@ -471,25 +477,96 @@ export class BSNSignatureService {
           }
         },
         {
-          $count: 'total_signing_blocks'
+          $sort: { _id: -1 }
+        },
+        {
+          $limit: blockCount
         }
       ]);
 
-      const totalSigningBlocks = activeSigningBlocks[0]?.total_signing_blocks || activeBlocks;
-      const missedBlocks = Math.max(0, totalSigningBlocks - signedBlocks);
-      const signaturePercentage = totalSigningBlocks > 0 ? (signedBlocks / totalSigningBlocks) * 100 : 0;
+      if (lastActiveBlocks.length === 0) {
+        return null;
+      }
+
+      const activeBlockHeights = lastActiveBlocks.map(block => block._id as number);
+      const minHeight = Math.min(...activeBlockHeights);
+      const maxHeight = Math.max(...activeBlockHeights);
+
+      // Get this FP's OVERALL signature info
+      const fpOverallData = await BSNSignature.aggregate([
+        {
+          $match: {
+            fp_btc_pk_hex: fpPubkeyHex,
+            consumer_id: consumerId,
+            network: network
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            first_signature_height: { $min: '$block_height' },
+            last_signature_height: { $max: '$block_height' },
+            last_signature_time: { $max: '$signed_at' }
+          }
+        }
+      ]);
+
+      if (!fpOverallData[0]) {
+        return {
+          fp_pubkey_hex: fpPubkeyHex,
+          consumer_id: consumerId,
+          active_blocks: activeBlockHeights.length,
+          signed_blocks: 0,
+          missed_blocks: activeBlockHeights.length,
+          signature_percentage: 0,
+          block_range: { from: minHeight, to: maxHeight }
+        };
+      }
+
+      const fpData = fpOverallData[0];
+      const firstSignatureHeight = fpData.first_signature_height;
+      const lastSignatureHeight = fpData.last_signature_height;
+
+      // Filter active blocks to only those within FP's active period
+      const relevantBlocks = activeBlockHeights.filter(height => 
+        height >= firstSignatureHeight && height <= lastSignatureHeight
+      );
+
+      if (relevantBlocks.length === 0) {
+        return {
+          fp_pubkey_hex: fpPubkeyHex,
+          consumer_id: consumerId,
+          active_blocks: 0,
+          signed_blocks: 0,
+          missed_blocks: 0,
+          signature_percentage: 0,
+          block_range: { from: minHeight, to: maxHeight }
+        };
+      }
+
+      // Count this FP's signatures in the relevant active blocks
+      const signedBlocks = await BSNSignature.countDocuments({
+        fp_btc_pk_hex: fpPubkeyHex,
+        consumer_id: consumerId,
+        network: network,
+        block_height: { $in: relevantBlocks }
+      });
+
+      const totalActiveBlocks = relevantBlocks.length;
+      const missedBlocks = Math.max(0, totalActiveBlocks - signedBlocks);
+      const signaturePercentage = totalActiveBlocks > 0 ? (signedBlocks / totalActiveBlocks) * 100 : 0;
 
       return {
         fp_pubkey_hex: fpPubkeyHex,
         consumer_id: consumerId,
-        active_blocks: totalSigningBlocks,
+        active_blocks: totalActiveBlocks,
         signed_blocks: signedBlocks,
         missed_blocks: missedBlocks,
         signature_percentage: Math.round(signaturePercentage * 100) / 100, // Round to 2 decimals
-        block_range: { from: fromHeight, to: latestHeight },
+        block_range: { from: minHeight, to: maxHeight },
         first_signature_height: firstSignatureHeight,
         last_signature_height: lastSignatureHeight,
-        last_signature_time: stats?.last_signature_time
+        last_signature_time: fpData.last_signature_time
       };
     } catch (error) {
       logger.error(`[BSNSignatureService] Error getting FP signature statistics:`, error);
