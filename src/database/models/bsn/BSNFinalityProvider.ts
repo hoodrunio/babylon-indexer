@@ -57,7 +57,8 @@ const BSNFinalityProviderSchema = new Schema<IBSNFinalityProvider>({
   },
   registration_tx_hash: {
     type: String,
-    required: true,
+    required: false,
+    default: '',
     index: true
   },
   signature_count: {

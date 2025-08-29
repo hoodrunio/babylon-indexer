@@ -13,7 +13,6 @@ import { ConsumerMapping } from '../../utils/bsn/ConsumerMapping';
 export interface BSNSignatureData {
   fp_pubkey_hex: string;
   height: number;
-  signature_hex: string;
   [key: string]: any;
 }
 
@@ -116,7 +115,6 @@ export class BSNSignatureService {
         fp_btc_pk_hex: signatureData.fp_pubkey_hex,
         sequence_number: sequenceNumber,
         block_height: signatureData.height,
-        signature_hex: signatureData.signature_hex,
         tx_hash: context.txHash,
         network: context.network,
         signed_at: context.signedAt

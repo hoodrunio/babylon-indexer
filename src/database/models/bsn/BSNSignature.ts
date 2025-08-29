@@ -12,7 +12,6 @@ export interface IBSNSignature extends Document {
   fp_btc_pk_hex: string;          // Denormalized for fast queries
   sequence_number: number;         // Auto-increment per FP (for 10k limit)
   block_height: number;
-  signature_hex: string;
   tx_hash: string;
   network: Network;
   signed_at: Date;
@@ -55,10 +54,6 @@ const BSNSignatureSchema = new Schema<IBSNSignature>({
     type: Number,
     required: true,
     index: true
-  },
-  signature_hex: {
-    type: String,
-    required: true
   },
   tx_hash: {
     type: String,
