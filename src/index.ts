@@ -20,6 +20,7 @@ import { CosmWasmScheduler } from './services/cosmwasm/scheduler.service';
 import { errorHandler } from './api/errorHandlers';
 import { initializeTransactionStats } from './services/block-processor/transaction/stats/initializeStats';
 import { IBCModule } from './services/ibc/IBCModule';
+import { BSNConsumerService } from './services/bsn/BSNConsumerService';
 
 // Load environment variables
 dotenv.config();
@@ -103,6 +104,27 @@ async function startServer() {
     // Initialize StatsController to start background cache refresh
     logger.info('Initializing StatsController with background cache refresh...');
     StatsController.initialize();
+    
+    // Initialize BSN Consumer sync
+    logger.info('Initializing BSN Consumer sync...');
+    const bsnConsumerService = BSNConsumerService.getInstance();
+    bsnConsumerService.syncAllConsumersToDatabase().then(result => {
+        logger.info(`BSN Consumer sync completed: ${result.synced} synced, ${result.errors} errors`);
+    }).catch(error => {
+        logger.error('BSN Consumer initial sync failed:', error);
+        // Non-fatal error, continue application startup
+    });
+    
+    // Setup periodic BSN consumer refresh (every 30 minutes)
+    setInterval(async () => {
+        try {
+            logger.info('Running periodic BSN consumer sync...');
+            const result = await bsnConsumerService.syncAllConsumersToDatabase();
+            logger.info(`Periodic BSN consumer sync completed: ${result.synced} synced, ${result.errors} errors`);
+        } catch (error) {
+            logger.error('Periodic BSN consumer sync failed:', error);
+        }
+    }, 30 * 60 * 1000); // 30 minutes
     
     // Start historical sync if BLOCK_SYNC_ENABLED is true
     if (process.env.BLOCK_SYNC_ENABLED === 'true') {

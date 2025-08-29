@@ -14,6 +14,7 @@ import {
 import { BabylonClient } from '../../clients/BabylonClient';
 import { CacheService } from '../CacheService';
 import { ZoneConciergeService } from './ZoneConciergeService';
+import { BSNConsumer } from '../../database/models/bsn/BSNConsumer';
 import { logger } from '../../utils/logger';
 
 interface CacheEntry<T> {
@@ -200,6 +201,42 @@ export class BSNConsumerService {
     }
 
     /**
+     * Sync consumer data from API to database
+     */
+    private async syncConsumerToDatabase(
+        consumer: ConsumerRegister, 
+        consumerType: ConsumerType,
+        isActive: boolean,
+        network: Network
+    ): Promise<void> {
+        try {
+            await BSNConsumer.findOneAndUpdate(
+                { consumer_id: consumer.consumer_id, network },
+                {
+                    consumer_name: consumer.consumer_name,
+                    consumer_description: consumer.consumer_description,
+                    consumer_type: consumerType,
+                    cosmos_channel_id: consumer.cosmos_channel_id,
+                    rollup_finality_contract_address: consumer.rollup_finality_contract_address,
+                    babylon_rewards_commission: consumer.babylon_rewards_commission,
+                    is_active: isActive,
+                    registration_height: consumer.registration_height || 0,
+                    registration_tx_hash: consumer.registration_tx_hash || '',
+                    network,
+                    last_updated_height: consumer.last_updated_height || 0
+                },
+                { 
+                    upsert: true, 
+                    new: true,
+                    setDefaultsOnInsert: true
+                }
+            );
+        } catch (error) {
+            logger.error(`Failed to sync consumer ${consumer.consumer_id} to database:`, error);
+        }
+    }
+
+    /**
      * Get all registered BSN consumers
      */
     public async getConsumerRegistryList(
@@ -240,7 +277,7 @@ export class BSNConsumerService {
                 };
                 const rawConsumers = data.consumer_registers || [];
                 
-                // Transform to response format with async activity checks
+                // Transform to response format with async activity checks and database sync
                 const consumers: ConsumerRegisterResponse[] = await Promise.all(
                     rawConsumers.map(async (consumer: ConsumerRegister) => {
                         // Determine consumer type based on channel_id
@@ -248,6 +285,10 @@ export class BSNConsumerService {
                         
                         // Check activity status using finalized BSN data
                         const isActive = await this.checkConsumerActivity(consumer.consumer_id, network);
+                        
+                        // Sync to database in background
+                        this.syncConsumerToDatabase(consumer, consumerType, isActive, network)
+                            .catch(error => logger.error(`Background sync failed for ${consumer.consumer_id}:`, error));
                         
                         return {
                             consumer_id: consumer.consumer_id,
@@ -336,6 +377,10 @@ export class BSNConsumerService {
                         
                         // Check activity status using finalized BSN data
                         const isActive = await this.checkConsumerActivity(consumer.consumer_id, network);
+                        
+                        // Sync to database in background
+                        this.syncConsumerToDatabase(consumer, consumerType, isActive, network)
+                            .catch(error => logger.error(`Background sync failed for ${consumer.consumer_id}:`, error));
                         
                         return {
                             consumer_id: consumer.consumer_id,
@@ -434,5 +479,59 @@ export class BSNConsumerService {
                 return counts;
             }
         );
+    }
+
+    /**
+     * Force sync all consumers from API to database
+     * Useful for initial setup or manual updates
+     */
+    public async syncAllConsumersToDatabase(
+        network: Network = this.network
+    ): Promise<{ synced: number; errors: number }> {
+        logger.info(`[BSNConsumerService] Starting full consumer sync for network: ${network}`);
+        
+        try {
+            const { consumers } = await this.getConsumerRegistryList({}, network);
+            let synced = 0;
+            let errors = 0;
+
+            await Promise.all(
+                consumers.map(async (consumer) => {
+                    try {
+                        await BSNConsumer.findOneAndUpdate(
+                            { consumer_id: consumer.consumer_id, network },
+                            {
+                                consumer_name: consumer.consumer_name,
+                                consumer_description: consumer.consumer_description,
+                                consumer_type: consumer.consumer_type,
+                                cosmos_channel_id: consumer.cosmos_channel_id,
+                                rollup_finality_contract_address: consumer.rollup_finality_contract_address,
+                                babylon_rewards_commission: consumer.babylon_rewards_commission,
+                                is_active: consumer.is_active,
+                                registration_height: 0, // API doesn't provide this
+                                registration_tx_hash: '', // API doesn't provide this
+                                network,
+                                last_updated_height: 0 // API doesn't provide this
+                            },
+                            { 
+                                upsert: true, 
+                                new: true,
+                                setDefaultsOnInsert: true
+                            }
+                        );
+                        synced++;
+                    } catch (error) {
+                        logger.error(`Failed to sync consumer ${consumer.consumer_id}:`, error);
+                        errors++;
+                    }
+                })
+            );
+
+            logger.info(`[BSNConsumerService] Sync completed: ${synced} synced, ${errors} errors`);
+            return { synced, errors };
+        } catch (error) {
+            logger.error(`[BSNConsumerService] Full sync failed:`, error);
+            throw error;
+        }
     }
 }

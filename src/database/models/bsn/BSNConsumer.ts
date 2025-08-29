@@ -27,7 +27,6 @@ const BSNConsumerSchema = new Schema<IBSNConsumer>({
   consumer_id: {
     type: String,
     required: true,
-    unique: true,
     index: true
   },
   consumer_name: {
@@ -93,6 +92,9 @@ const BSNConsumerSchema = new Schema<IBSNConsumer>({
   timestamps: true,
   collection: 'bsn_consumers'
 });
+
+// Unique compound index - same consumer can exist in different networks
+BSNConsumerSchema.index({ consumer_id: 1, network: 1 }, { unique: true });
 
 // Compound indexes for common query patterns
 BSNConsumerSchema.index({ network: 1, consumer_type: 1 });
