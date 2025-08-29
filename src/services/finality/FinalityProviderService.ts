@@ -12,6 +12,8 @@ import {
 import { formatSatoshis, calculatePowerPercentage } from '../../utils/util';
 import { logger } from '../../utils/logger';
 import { NewBTCDelegation } from '../../database/models/NewBTCDelegation';
+import { BSNFinalityProvider } from '../../database/models/bsn/BSNFinalityProvider';
+import { Types } from 'mongoose';
 
 interface CacheEntry<T> {
     data: T;
@@ -606,5 +608,101 @@ export class FinalityProviderService {
                 }
             }
         );
+    }
+
+    /**
+     * Get or create BSN Finality Provider record in database
+     */
+    public async getOrCreateBSNFinalityProvider(
+        consumerId: string,
+        fpBtcPkHex: string,
+        network: Network = this.network
+    ): Promise<Types.ObjectId> {
+        let fp = await BSNFinalityProvider.findOne({
+            consumer_id: consumerId,
+            fp_btc_pk_hex: fpBtcPkHex,
+            network: network
+        });
+
+        if (!fp) {
+            fp = new BSNFinalityProvider({
+                consumer_id: consumerId,
+                fp_btc_pk_hex: fpBtcPkHex,
+                network: network,
+                is_active: true,
+                registration_height: 0,
+                registration_tx_hash: '',
+                signature_count: 0
+            });
+            await fp.save();
+            logger.info(`[FinalityProviderService] Created BSN FP record: ${fpBtcPkHex} for consumer ${consumerId}`);
+        }
+
+        return fp._id as Types.ObjectId;
+    }
+
+    /**
+     * Update BSN FP signature count and metadata
+     */
+    public async updateBSNFinalityProviderSignature(
+        fpId: Types.ObjectId,
+        blockHeight: number
+    ): Promise<void> {
+        const fp = await BSNFinalityProvider.findById(fpId);
+        if (fp) {
+            await fp.incrementSignatureCount(blockHeight);
+        }
+    }
+
+    /**
+     * Check if BSN FP needs signature cleanup
+     */
+    public async checkBSNFinalityProviderCleanup(fpId: Types.ObjectId): Promise<boolean> {
+        const fp = await BSNFinalityProvider.findById(fpId);
+        return fp ? fp.needsCleanup() : false;
+    }
+
+    /**
+     * Update BSN FP after signature cleanup
+     */
+    public async updateBSNFinalityProviderAfterCleanup(
+        fpId: Types.ObjectId,
+        remainingCount: number,
+        newOldestHeight: number
+    ): Promise<void> {
+        const fp = await BSNFinalityProvider.findById(fpId);
+        if (fp) {
+            await fp.updateAfterCleanup(remainingCount, newOldestHeight);
+        }
+    }
+
+    /**
+     * Sync active BSN finality providers to database
+     */
+    public async syncBSNFinalityProvidersToDatabase(
+        consumerId: string,
+        network: Network = this.network
+    ): Promise<{ synced: number; errors: number }> {
+        try {
+            const providers = await this.getActiveFinalityProvidersForBSN(consumerId, network, true);
+            let synced = 0;
+            let errors = 0;
+
+            for (const provider of providers) {
+                try {
+                    await this.getOrCreateBSNFinalityProvider(consumerId, provider.btc_pk, network);
+                    synced++;
+                } catch (error) {
+                    logger.error(`Failed to sync BSN FP ${provider.btc_pk}:`, error);
+                    errors++;
+                }
+            }
+
+            logger.info(`[FinalityProviderService] BSN FP sync for ${consumerId}: ${synced} synced, ${errors} errors`);
+            return { synced, errors };
+        } catch (error) {
+            logger.error(`[FinalityProviderService] BSN FP sync failed for ${consumerId}:`, error);
+            throw error;
+        }
     }
 } 

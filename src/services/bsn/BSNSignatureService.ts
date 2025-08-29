@@ -1,17 +1,20 @@
 /**
  * BSN Signature Service
- * Handles rollup BSN signature processing and tracking
+ * Handles BSN signature processing with 10k limit per FP
  */
 
-import { BSNRollupSignature } from '../../database/models/bsn';
-import { ConsumerMapping } from '../../utils/bsn/ConsumerMapping';
-import { Network } from '../../types/bsn';
+import { Types } from 'mongoose';
 import { logger } from '../../utils/logger';
+import { BSNSignature } from '../../database/models/bsn/BSNSignature';
+import { Network } from '../../types/finality';
+import { FinalityProviderService } from '../finality/FinalityProviderService';
+import { ConsumerMapping } from '../../utils/bsn/ConsumerMapping';
 
 export interface BSNSignatureData {
   fp_pubkey_hex: string;
   height: number;
-  [key: string]: any; // Additional signature data
+  signature_hex: string;
+  [key: string]: any;
 }
 
 export interface BSNSignatureContext {
@@ -27,13 +30,18 @@ export interface FPSignatureStats {
   total_signatures: number;
   last_signature_height: number;
   last_signature_time: Date;
+  sequence_range: { oldest: number; latest: number };
 }
 
 export class BSNSignatureService {
   private static instance: BSNSignatureService | null = null;
+  private readonly MAX_SIGNATURES_PER_FP = 10000;
+  private readonly CLEANUP_BATCH_SIZE = 1000;
+  private finalityProviderService: FinalityProviderService;
   private consumerMapping: ConsumerMapping;
 
   private constructor() {
+    this.finalityProviderService = FinalityProviderService.getInstance();
     this.consumerMapping = ConsumerMapping.getInstance();
   }
 
@@ -45,14 +53,29 @@ export class BSNSignatureService {
   }
 
   /**
-   * Process and save rollup BSN signature
+   * Get or create BSN Finality Provider using FinalityProviderService
+   */
+  private async getOrCreateFP(
+    consumerId: string,
+    fpBtcPkHex: string,
+    network: Network
+  ): Promise<Types.ObjectId> {
+    return await this.finalityProviderService.getOrCreateBSNFinalityProvider(
+      consumerId,
+      fpBtcPkHex,
+      network
+    );
+  }
+
+  /**
+   * Process and save BSN signature (optimized with 10k limit)
    */
   async handleSignature(
     signatureData: BSNSignatureData,
     context: BSNSignatureContext
   ): Promise<void> {
     try {
-      // Get consumer ID from contract mapping
+      // Get consumer ID from contract address
       const consumerId = await this.consumerMapping.getConsumerIdFromContract(
         context.contractAddress,
         context.network
@@ -63,35 +86,85 @@ export class BSNSignatureService {
         return;
       }
 
+      // Get or create FP record
+      const fpId = await this.getOrCreateFP(
+        consumerId,
+        signatureData.fp_pubkey_hex,
+        context.network
+      );
+
       // Check if signature already exists (prevent duplicates)
-      const existingSignature = await BSNRollupSignature.findOne({
-        tx_hash: context.txHash,
+      const existingSignature = await BSNSignature.findOne({
+        consumer_id: consumerId,
+        fp_btc_pk_hex: signatureData.fp_pubkey_hex,
+        block_height: signatureData.height,
         network: context.network
       });
 
       if (existingSignature) {
-        logger.debug(`[BSNSignatureService] Signature already exists for tx: ${context.txHash}`);
+        logger.debug(`[BSNSignatureService] Signature already exists for FP ${signatureData.fp_pubkey_hex} at height ${signatureData.height}`);
         return;
       }
 
+      // Get next sequence number for this FP
+      const sequenceNumber = await BSNSignature.getNextSequenceNumber(fpId);
+
       // Create and save signature record
-      const rollupSignature = new BSNRollupSignature({
+      const signature = new BSNSignature({
+        fp_id: fpId,
         consumer_id: consumerId,
-        fp_pubkey_hex: signatureData.fp_pubkey_hex,
+        fp_btc_pk_hex: signatureData.fp_pubkey_hex,
+        sequence_number: sequenceNumber,
         block_height: signatureData.height,
-        contract_address: context.contractAddress,
+        signature_hex: signatureData.signature_hex,
         tx_hash: context.txHash,
         network: context.network,
         signed_at: context.signedAt
       });
 
-      await rollupSignature.save();
+      await signature.save();
+
+      // Update FP metadata and check for cleanup
+      await this.finalityProviderService.updateBSNFinalityProviderSignature(fpId, signatureData.height);
+      
+      const needsCleanup = await this.finalityProviderService.checkBSNFinalityProviderCleanup(fpId);
+      if (needsCleanup) {
+        await this.cleanupOldSignatures(fpId);
+      }
 
       logger.info(`[BSNSignatureService] Saved signature: FP ${signatureData.fp_pubkey_hex} for block ${signatureData.height} on consumer ${consumerId}`);
 
     } catch (error) {
       logger.error(`[BSNSignatureService] Error handling signature:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * Cleanup old signatures for FP (keep only latest 10k)
+   */
+  private async cleanupOldSignatures(fpId: Types.ObjectId): Promise<void> {
+    try {
+      logger.info(`[BSNSignatureService] Starting cleanup for FP ${fpId}`);
+
+      const result = await BSNSignature.cleanupOldSignatures(fpId, this.MAX_SIGNATURES_PER_FP);
+      
+      if (result.deletedCount > 0) {
+        // Update FP metadata
+        const remainingCount = await BSNSignature.getSignatureCountByFP(fpId);
+        
+        if (result.oldestHeight) {
+          await this.finalityProviderService.updateBSNFinalityProviderAfterCleanup(
+            fpId,
+            remainingCount,
+            result.oldestHeight
+          );
+        }
+
+        logger.info(`[BSNSignatureService] Cleanup completed: deleted ${result.deletedCount} old signatures for FP ${fpId}`);
+      }
+    } catch (error) {
+      logger.error(`[BSNSignatureService] Error during cleanup for FP ${fpId}:`, error);
     }
   }
 
@@ -113,7 +186,7 @@ export class BSNSignatureService {
         matchFilter.consumer_id = consumerId;
       }
 
-      const stats = await BSNRollupSignature.aggregate([
+      const stats = await BSNSignature.aggregate([
         { $match: matchFilter },
         {
           $group: {
@@ -164,7 +237,7 @@ export class BSNSignatureService {
         filter.consumer_id = consumerId;
       }
 
-      return await BSNRollupSignature.find(filter)
+      return await BSNSignature.find(filter)
         .sort({ block_height: 1, signed_at: 1 })
         .lean();
     } catch (error) {
@@ -222,7 +295,7 @@ export class BSNSignatureService {
    */
   async getLatestSignatureHeight(network: Network, consumerId: string): Promise<number> {
     try {
-      const latest = await BSNRollupSignature.findOne({
+      const latest = await BSNSignature.findOne({
         network: network,
         consumer_id: consumerId
       })
@@ -242,7 +315,7 @@ export class BSNSignatureService {
    */
   async getActiveFPsForConsumer(network: Network, consumerId: string): Promise<string[]> {
     try {
-      const recentSignatures = await BSNRollupSignature.aggregate([
+      const recentSignatures = await BSNSignature.aggregate([
         {
           $match: {
             network: network,
@@ -257,7 +330,7 @@ export class BSNSignatureService {
         }
       ]);
 
-      return recentSignatures.map(sig => sig._id);
+      return recentSignatures.map((sig: any) => sig._id);
     } catch (error) {
       logger.error(`[BSNSignatureService] Error getting active FPs:`, error);
       return [];
