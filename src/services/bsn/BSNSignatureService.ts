@@ -397,11 +397,12 @@ export class BSNSignatureService {
   ): Promise<{
     fp_pubkey_hex: string;
     consumer_id: string;
-    total_blocks: number;
+    active_blocks: number;
     signed_blocks: number;
     missed_blocks: number;
     signature_percentage: number;
     block_range: { from: number; to: number };
+    first_signature_height?: number;
     last_signature_height?: number;
     last_signature_time?: Date;
   } | null> {
@@ -413,9 +414,8 @@ export class BSNSignatureService {
       }
 
       const fromHeight = Math.max(1, latestHeight - blockCount + 1);
-      const totalBlocks = latestHeight - fromHeight + 1;
 
-      // Get signature count and latest signature info for this FP in the range
+      // Get signature count and signature info for this FP in the range
       const signatureData = await BSNSignature.aggregate([
         {
           $match: {
@@ -429,6 +429,7 @@ export class BSNSignatureService {
           $group: {
             _id: null,
             signed_blocks: { $sum: 1 },
+            first_signature_height: { $min: '$block_height' },
             last_signature_height: { $max: '$block_height' },
             last_signature_time: { $max: '$signed_at' }
           }
@@ -437,18 +438,57 @@ export class BSNSignatureService {
 
       const stats = signatureData[0];
       const signedBlocks = stats?.signed_blocks || 0;
-      const missedBlocks = totalBlocks - signedBlocks;
-      const signaturePercentage = totalBlocks > 0 ? (signedBlocks / totalBlocks) * 100 : 0;
+
+      if (signedBlocks === 0) {
+        return {
+          fp_pubkey_hex: fpPubkeyHex,
+          consumer_id: consumerId,
+          active_blocks: 0,
+          signed_blocks: 0,
+          missed_blocks: 0,
+          signature_percentage: 0,
+          block_range: { from: fromHeight, to: latestHeight }
+        };
+      }
+
+      // Calculate active period: from first signature to latest signature
+      const firstSignatureHeight = stats.first_signature_height;
+      const lastSignatureHeight = stats.last_signature_height;
+      const activeBlocks = lastSignatureHeight - firstSignatureHeight + 1;
+
+      // Get blocks in active period that had signatures from ANY FP to determine required signing blocks
+      const activeSigningBlocks = await BSNSignature.aggregate([
+        {
+          $match: {
+            consumer_id: consumerId,
+            network: network,
+            block_height: { $gte: firstSignatureHeight, $lte: lastSignatureHeight }
+          }
+        },
+        {
+          $group: {
+            _id: '$block_height'
+          }
+        },
+        {
+          $count: 'total_signing_blocks'
+        }
+      ]);
+
+      const totalSigningBlocks = activeSigningBlocks[0]?.total_signing_blocks || activeBlocks;
+      const missedBlocks = Math.max(0, totalSigningBlocks - signedBlocks);
+      const signaturePercentage = totalSigningBlocks > 0 ? (signedBlocks / totalSigningBlocks) * 100 : 0;
 
       return {
         fp_pubkey_hex: fpPubkeyHex,
         consumer_id: consumerId,
-        total_blocks: totalBlocks,
+        active_blocks: totalSigningBlocks,
         signed_blocks: signedBlocks,
         missed_blocks: missedBlocks,
         signature_percentage: Math.round(signaturePercentage * 100) / 100, // Round to 2 decimals
         block_range: { from: fromHeight, to: latestHeight },
-        last_signature_height: stats?.last_signature_height,
+        first_signature_height: firstSignatureHeight,
+        last_signature_height: lastSignatureHeight,
         last_signature_time: stats?.last_signature_time
       };
     } catch (error) {
@@ -467,11 +507,12 @@ export class BSNSignatureService {
   ): Promise<Array<{
     fp_pubkey_hex: string;
     consumer_id: string;
-    total_blocks: number;
+    active_blocks: number;
     signed_blocks: number;
     missed_blocks: number;
     signature_percentage: number;
     block_range: { from: number; to: number };
+    first_signature_height?: number;
     last_signature_height?: number;
     last_signature_time?: Date;
   }>> {
@@ -483,9 +524,8 @@ export class BSNSignatureService {
       }
 
       const fromHeight = Math.max(1, latestHeight - blockCount + 1);
-      const totalBlocks = latestHeight - fromHeight + 1;
 
-      // Get all unique FPs and their stats in one aggregation
+      // Get all unique FPs and their signature ranges in the period
       const fpStats = await BSNSignature.aggregate([
         {
           $match: {
@@ -498,26 +538,54 @@ export class BSNSignatureService {
           $group: {
             _id: '$fp_btc_pk_hex',
             signed_blocks: { $sum: 1 },
+            first_signature_height: { $min: '$block_height' },
             last_signature_height: { $max: '$block_height' },
             last_signature_time: { $max: '$signed_at' }
           }
         }
       ]);
 
+      // Get all blocks that had signatures from ANY FP in the period
+      const allSigningBlocks = await BSNSignature.aggregate([
+        {
+          $match: {
+            consumer_id: consumerId,
+            network: network,
+            block_height: { $gte: fromHeight, $lte: latestHeight }
+          }
+        },
+        {
+          $group: {
+            _id: '$block_height'
+          }
+        }
+      ]);
+
+      const signingBlocksSet = new Set(allSigningBlocks.map(block => block._id));
+
       return fpStats.map(stat => {
         const signedBlocks = stat.signed_blocks;
-        const missedBlocks = totalBlocks - signedBlocks;
-        const signaturePercentage = totalBlocks > 0 ? (signedBlocks / totalBlocks) * 100 : 0;
+        const firstSignatureHeight = stat.first_signature_height;
+        const lastSignatureHeight = stat.last_signature_height;
+
+        // Count blocks that required signatures within this FP's active period
+        const activeSigningBlocks = Array.from(signingBlocksSet).filter(
+          height => height >= firstSignatureHeight && height <= lastSignatureHeight
+        ).length;
+
+        const missedBlocks = Math.max(0, activeSigningBlocks - signedBlocks);
+        const signaturePercentage = activeSigningBlocks > 0 ? (signedBlocks / activeSigningBlocks) * 100 : 0;
 
         return {
           fp_pubkey_hex: stat._id,
           consumer_id: consumerId,
-          total_blocks: totalBlocks,
+          active_blocks: activeSigningBlocks,
           signed_blocks: signedBlocks,
           missed_blocks: missedBlocks,
           signature_percentage: Math.round(signaturePercentage * 100) / 100,
           block_range: { from: fromHeight, to: latestHeight },
-          last_signature_height: stat.last_signature_height,
+          first_signature_height: firstSignatureHeight,
+          last_signature_height: lastSignatureHeight,
           last_signature_time: stat.last_signature_time
         };
       }).sort((a, b) => b.signature_percentage - a.signature_percentage); // Sort by performance

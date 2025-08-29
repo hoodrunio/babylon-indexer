@@ -668,6 +668,10 @@ export class ZoneConciergeController {
             const avgSignaturePercentage = totalFPs > 0
                 ? statistics.reduce((sum, stat) => sum + stat.signature_percentage, 0) / totalFPs
                 : 0;
+            
+            const totalActiveBlocks = statistics.reduce((sum, stat) => sum + stat.active_blocks, 0);
+            const totalSignedBlocks = statistics.reduce((sum, stat) => sum + stat.signed_blocks, 0);
+            const totalMissedBlocks = statistics.reduce((sum, stat) => sum + stat.missed_blocks, 0);
 
             const bestPerformer = statistics.length > 0 ? statistics[0] : null;
             const worstPerformer = statistics.length > 0 
@@ -681,6 +685,9 @@ export class ZoneConciergeController {
                 total_fps: totalFPs,
                 sort: { by: sortBy, order },
                 overall_stats: {
+                    total_active_blocks: totalActiveBlocks,
+                    total_signed_blocks: totalSignedBlocks,
+                    total_missed_blocks: totalMissedBlocks,
                     average_signature_percentage: Math.round(avgSignaturePercentage * 100) / 100,
                     best_performer: bestPerformer ? {
                         fp_pubkey_hex: bestPerformer.fp_pubkey_hex,
