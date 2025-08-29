@@ -7,3 +7,4 @@ export { ZoneConciergeService } from './ZoneConciergeService';
 export { BSNEventHandler } from './BSNEventHandler';
 export { BSNMessageProcessor } from './BSNMessageProcessor';
 export { BSNIntegrationService } from './BSNIntegrationService';
+export { BSNSignatureService } from './BSNSignatureService';
