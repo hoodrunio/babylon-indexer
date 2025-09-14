@@ -16,6 +16,8 @@ export interface FinalityProvider {
     slashed_btc_height: number;
     jailed: boolean;
     highest_voted_height: number;
+    // BSN support - ID of the BSN the finality provider is securing
+    bsn_id?: string;
 }
 
 export interface FinalityProviderWithMeta {
@@ -27,6 +29,8 @@ export interface FinalityProviderWithMeta {
     slashed_btc_height: number;
     jailed: boolean;
     highest_voted_height: number;
+    // BSN support - ID of the BSN the finality provider is securing
+    bsn_id?: string;
 }
 
 export interface ProofOfPossessionBTC {

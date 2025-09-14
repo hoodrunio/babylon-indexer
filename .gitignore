@@ -27,3 +27,8 @@ babylon-staker-monitor
 m.md
 test-schema/execute.json
 src/utils/btc-transaction.ts
+src/scripts/test-decoder.ts
+exec.json
+src/services/ibc/REFACTORING_SUMMARY.md
+ibc-endpoints*
+src/scripts/test-ibc-endpoints.ts

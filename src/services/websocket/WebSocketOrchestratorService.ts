@@ -4,7 +4,7 @@ import { WebSocketConnectionService } from './WebSocketConnectionService';
 import { WebSocketConfigService } from './WebSocketConfigService';
 import { WebSocketMessageService } from './WebSocketMessageService';
 import { WebSocketReconnectionService } from './WebSocketReconnectionService';
-import { WebsocketHealthTracker } from '../btc-delegations/WebsocketHealthTracker';
+import { WebsocketHealthTracker } from './WebsocketHealthTracker';
 import { ValidatorHistoricalSyncService } from '../validator/ValidatorHistoricalSyncService';
 import { IWebSocketEventHandlers } from './interfaces';
 import { WebSocketHealthMonitor } from './WebSocketHealthMonitor';
@@ -135,7 +135,6 @@ export class WebSocketOrchestratorService {
         logger.info(`${network} websocket connection closed`);
         this.healthTracker.markDisconnected(network);
         
-        const config = this.configService.getNetworkConfig();
         await this.reconnectionService.handleReconnect(
             network, 
             () => this.reconnect(network)

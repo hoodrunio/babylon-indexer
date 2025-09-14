@@ -6,9 +6,11 @@ import { BaseTx, TxMessage, TxProcessorError, TxStatus, WebsocketTxEvent } from 
 import { ITransactionProcessorService, ITxStorage } from '../types/interfaces';
 import { decodeTx } from '../../decoders/transaction';
 import { Network } from '../../../types/finality';
+import { BSNSignatureService } from '../../bsn/BSNSignatureService';
 
 export class TransactionProcessorService implements ITransactionProcessorService {
   private network: Network;
+  private bsnSignatureService: BSNSignatureService;
 
   constructor(
     private readonly txStorage: ITxStorage,
@@ -16,6 +18,7 @@ export class TransactionProcessorService implements ITransactionProcessorService
     network: Network
   ) {
     this.network = network;
+    this.bsnSignatureService = BSNSignatureService.getInstance();
   }
 
   /**
@@ -47,6 +50,9 @@ export class TransactionProcessorService implements ITransactionProcessorService
 
       // Save to database
       await this.txStorage.saveTx(baseTx, this.network);
+      
+      // Process rollup BSN signatures if present
+      await this.processRollupBSNSignatures(txData, decodedTx, baseTx);
       
       return baseTx;
     } catch (error) {
@@ -245,6 +251,66 @@ export class TransactionProcessorService implements ITransactionProcessorService
       throw new TxProcessorError('Invalid TX data');
     }
   }
+
+  /**
+   * Process rollup BSN signatures if present in transaction
+   */
+  private async processRollupBSNSignatures(txData: any, decodedTx: any, baseTx: BaseTx): Promise<void> {
+    try {
+      // Check if this is a rollup BSN signature transaction
+      const signatureMessage = this.extractRollupSignatureMessage(decodedTx);
+      if (!signatureMessage) {
+        return; // Not a rollup signature transaction
+      }
+
+      const { contractAddress, signatureData } = signatureMessage;
+      
+      // Extract timestamp from transaction response if available
+      const signedAt = txData.tx_response?.timestamp 
+        ? new Date(txData.tx_response.timestamp)
+        : new Date();
+
+      // Delegate to BSN signature service
+      await this.bsnSignatureService.handleSignature(
+        signatureData,
+        {
+          contractAddress,
+          txHash: baseTx.txHash,
+          signedAt,
+          network: this.network
+        }
+      );
+    } catch (error) {
+      // Don't throw error, just log it to avoid breaking main transaction processing
+      console.error(`Error processing rollup BSN signature for tx ${baseTx.txHash}:`, error);
+    }
+  }
+
+  /**
+   * Extract rollup signature message from decoded transaction
+   */
+  private extractRollupSignatureMessage(decodedTx: any): { contractAddress: string; signatureData: any } | null {
+    try {
+      // Look for CosmWasm execute contract message with submit_finality_signature
+      const wasmMessages = decodedTx.messages.filter((msg: any) => 
+        msg.typeUrl === '/cosmwasm.wasm.v1.MsgExecuteContract'
+      );
+
+      for (const msg of wasmMessages) {
+        if (msg.content?.msg?.submit_finality_signature) {
+          return {
+            contractAddress: msg.content.contract,
+            signatureData: msg.content.msg.submit_finality_signature
+          };
+        }
+      }
+
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
 
   /**
    * Validate websocket event data

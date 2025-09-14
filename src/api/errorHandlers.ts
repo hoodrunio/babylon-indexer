@@ -6,7 +6,7 @@ import { logger } from '../utils/logger';
  * Generic error handler for API routes
  * Transforms errors into appropriate HTTP responses
  */
-export function errorHandler(err: any, req: Request, res: Response, next: NextFunction) {
+export function errorHandler(err: any, req: Request, res: Response, _next: NextFunction) {
     if (err instanceof FutureBlockError) {
         // Handle future block errors with a 404 status but with helpful information
         const { targetHeight, currentHeight, blockDifference, estimatedSeconds } = err.details;
@@ -35,7 +35,9 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
     }
     
     // General errors
-    logger.error(`[API Error] ${err.message || JSON.stringify(err)}`);
+    const errorMessage = err.message || (typeof err === 'string' ? err : 'Unknown error');
+    const stackTrace = err.stack ? `\nStack: ${err.stack}` : '';
+    logger.error(`[API Error] ${errorMessage}${stackTrace}`);
     
     return res.status(500).json({
         status: 'error',

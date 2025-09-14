@@ -2,7 +2,7 @@ import { Network } from '../../types/finality';
 import { logger } from '../../utils/logger';
 import { IMessageProcessor, ISubscription } from './interfaces';
 import { BTCDelegationEventHandler } from '../btc-delegations/BTCDelegationEventHandler';
-import { WebsocketHealthTracker } from '../btc-delegations/WebsocketHealthTracker';
+import { WebsocketHealthTracker } from './WebsocketHealthTracker';
 import { BLSCheckpointService } from '../checkpointing/BLSCheckpointService';
 import { CheckpointStatusHandler } from '../checkpointing/CheckpointStatusHandler';
 import { ValidatorSignatureService } from '../validator/ValidatorSignatureService';
@@ -35,7 +35,7 @@ export abstract class BaseMessageProcessor implements IMessageProcessor {
 
 // BTC Staking events processor
 export class BTCStakingMessageProcessor extends BaseMessageProcessor {
-    constructor(private eventHandler: BTCDelegationEventHandler, private healthTracker: WebsocketHealthTracker) {
+    constructor(private eventHandler: BTCDelegationEventHandler) {
         super();
     }
 
@@ -56,7 +56,6 @@ export class BTCStakingMessageProcessor extends BaseMessageProcessor {
         };
 
         if (txData.height && txData.hash && txData.events) {
-            await this.healthTracker.updateBlockHeight(network, height);
             await this.eventHandler.handleEvent(txData, network);
         }
     }
@@ -115,7 +114,8 @@ export class NewBlockMessageProcessor extends BaseMessageProcessor {
     constructor(
         private checkpointStatusHandler: CheckpointStatusHandler,
         private validatorSignatureService: ValidatorSignatureService,
-        private blockTransactionHandler: BlockTransactionHandler
+        private blockTransactionHandler: BlockTransactionHandler,
+        private healthTracker: WebsocketHealthTracker
     ) {
         super();
     }
@@ -127,27 +127,40 @@ export class NewBlockMessageProcessor extends BaseMessageProcessor {
     }
 
     async process(message: any, network: Network): Promise<void> {
-        // Handle checkpoint status updates
-        if (message?.result?.data?.value?.result_finalize_block && 
-            message.id === 'new_block') {
-            await this.checkpointStatusHandler.handleNewBlock(message, network);
-        }
+        const messageResultData = message?.result?.data;
 
-        // Handle validator signatures
-        if (message?.result?.data?.type === 'tendermint/event/NewBlock') {
-            const blockData = message.result.data.value;
+        // Handle messages of type 'tendermint/event/NewBlock'
+        // This is the primary event for new block information including height.
+        if (messageResultData?.type === 'tendermint/event/NewBlock') {
+            const blockData = messageResultData.value; // Contains block header, transactions, etc.
+
+            // Update health tracker with block height as soon as it's available
+            if (blockData?.block?.header?.height) {
+                const blockHeight = parseInt(blockData.block.header.height);
+                await this.healthTracker.updateBlockHeight(network, blockHeight);
+            } else {
+                // Log a warning if height is unexpectedly missing from a NewBlock event
+                logger.warn(`[NewBlockMessageProcessor] Block height not found in 'tendermint/event/NewBlock' data. Message: ${JSON.stringify(message).substring(0, 250)}`);
+            }
+
+            // Process validator signatures using the same blockData
             await this.validatorSignatureService.handleNewBlock(blockData, network);
-        }
 
-        // Handle block transactions
-        if (message?.result?.data?.type === 'tendermint/event/NewBlock') {
-            // Check block data and pass it correctly
-            const blockData = message.result.data.value;
-            if (blockData && blockData.block) {
+            // Process block transactions using the same blockData
+            if (blockData?.block) { // Ensure 'block' field exists for transaction handler
                 await this.blockTransactionHandler.handleNewBlock(blockData, network);
             } else {
-                logger.warn(`[BlockMessageProcessor] Block data structure is not as expected: ${JSON.stringify(blockData).substring(0, 200)}...`);
+                logger.warn(`[NewBlockMessageProcessor] Expected 'block' field missing in 'tendermint/event/NewBlock' data for transaction processing. Value: ${JSON.stringify(blockData).substring(0, 250)}`);
             }
+        }
+
+        // Separately, handle checkpoint status updates if the message specifically indicates it.
+        // This condition comes from the `canProcess` logic:
+        // (message?.result?.data?.value?.result_finalize_block && message.id === 'new_block')
+        // This might overlap with the 'tendermint/event/NewBlock' type or handle a nuanced case.
+        if (messageResultData?.value?.result_finalize_block && message.id === 'new_block') {
+            // The checkpointStatusHandler.handleNewBlock expects the full message object.
+            await this.checkpointStatusHandler.handleNewBlock(message, network);
         }
     }
 }
@@ -223,10 +236,10 @@ export class WebSocketMessageService {
         logger.info('[WebSocketMessageService] Block processor system initialized successfully');
         
         this.messageProcessors = [
-            new BTCStakingMessageProcessor(eventHandler, healthTracker),
+            new BTCStakingMessageProcessor(eventHandler),
             new CovenantMessageProcessor(covenantEventHandler),
             new BLSCheckpointMessageProcessor(blsCheckpointService),
-            new NewBlockMessageProcessor(checkpointStatusHandler, validatorSignatureService, blockTransactionHandler),
+            new NewBlockMessageProcessor(checkpointStatusHandler, validatorSignatureService, blockTransactionHandler, healthTracker),
             new GovernanceMessageProcessor(governanceEventHandler),
             // Add block and transaction processors
             ...blockTxProcessors
@@ -247,6 +260,29 @@ export class WebSocketMessageService {
     
     public getSubscriptions(): ISubscription[] {
         return this.subscriptions;
+    }
+    
+    /**
+     * Register a message processor dynamically
+     * This allows modules to add their processors without modifying this service
+     * @param processor Message processor to register
+     */
+    public registerMessageProcessor(processor: IMessageProcessor): void {
+        // Initialize message processors first if not already done
+        if (!this.initialized) {
+            this.initializeMessageProcessors();
+        }
+        
+        // Add the processor if it doesn't already exist
+        const exists = this.messageProcessors.some(existingProcessor => 
+            existingProcessor.constructor.name === processor.constructor.name);
+            
+        if (!exists) {
+            this.messageProcessors.push(processor);
+            logger.info(`[WebSocketMessageService] Registered message processor: ${processor.constructor.name}`);
+        } else {
+            logger.warn(`[WebSocketMessageService] Message processor already registered: ${processor.constructor.name}`);
+        }
     }
     
     public async processMessage(message: any, network: Network): Promise<void> {

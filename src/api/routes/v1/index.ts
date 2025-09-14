@@ -15,6 +15,8 @@ import newStakersRouter from './new-stakers';
 import statsRouter from './stats';
 import cosmwasmRouter from './cosmwasm.routes';
 import rewardsRouter from './rewards';
+import ibcRouter from './ibc';
+import bsnRouter from './bsn';
 
 const v1Router = Router();
 
@@ -37,5 +39,7 @@ v1Router.use('/stakers', newStakersRouter);
 v1Router.use('/stats', statsRouter);
 v1Router.use('/cosmwasm', cosmwasmRouter);
 v1Router.use('/rewards', rewardsRouter);
+v1Router.use('/ibc', ibcRouter);
+v1Router.use('/bsn', bsnRouter);
 
 export default v1Router;

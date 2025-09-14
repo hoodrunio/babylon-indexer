@@ -2,7 +2,7 @@ import { Network } from '../../types/finality';
 import { logger } from '../../utils/logger';
 import { WebSocketConnectionService } from './WebSocketConnectionService';
 import { WebSocketOrchestratorService } from './WebSocketOrchestratorService';
-import { WebsocketHealthTracker } from '../btc-delegations/WebsocketHealthTracker';
+import { WebsocketHealthTracker } from './WebsocketHealthTracker';
 import { WebSocketConfigService } from './WebSocketConfigService';
 import { BabylonClient } from '../../clients/BabylonClient';
 
@@ -110,14 +110,14 @@ export class WebSocketHealthMonitor {
     private checkAllConnections(): void {
         // In the simplified network approach, we only have one network from environment
         logger.debug(`[WebSocketHealthMonitor] Checking connection status for network: ${this.network}`);
-        this.checkConnection(this.network);
+        this.checkConnection();
     }
     
     /**
      * Check a specific WebSocket connection
      * Note: The network parameter is kept to preserve method signature, but we only use this.network internally
      */
-    private async checkConnection(network: Network): Promise<void> {
+    private async checkConnection(): Promise<void> {
         try {
             // Always use the network from BabylonClient for consistency
             const connection = this.connectionService.getConnection(this.network);

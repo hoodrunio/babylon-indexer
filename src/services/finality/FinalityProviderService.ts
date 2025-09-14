@@ -12,6 +12,8 @@ import {
 import { formatSatoshis, calculatePowerPercentage } from '../../utils/util';
 import { logger } from '../../utils/logger';
 import { NewBTCDelegation } from '../../database/models/NewBTCDelegation';
+import { BSNFinalityProvider } from '../../database/models/bsn/BSNFinalityProvider';
+import { Types } from 'mongoose';
 
 interface CacheEntry<T> {
     data: T;
@@ -52,7 +54,26 @@ export class FinalityProviderService {
         return FinalityProviderService.instance;
     }
 
-    private getNetworkConfig(network: Network) {
+    /**
+     * Maps Network enum to BSN-ID for finality provider endpoints
+     * Can be overridden with a custom BSN ID
+     */
+    private getBsnId(network: Network, customBsnId?: string): string {
+        if (customBsnId) {
+            return customBsnId;
+        }
+        
+        switch (network) {
+            case Network.MAINNET:
+                return 'bbn-1';
+            case Network.TESTNET:
+                return 'bbn-test-5';
+            default:
+                throw new Error(`Unknown network: ${network}`);
+        }
+    }
+
+    private getNetworkConfig() {
         // Always use our initialized client
         return {
             nodeUrl: this.babylonClient.getBaseUrl(),
@@ -133,13 +154,92 @@ export class FinalityProviderService {
         return data;
     }
 
+    /**
+     * Get finality providers for a specific BSN
+     * @param bsnId BSN identifier
+     * @param network Network to query
+     * @param activeOnly If true, returns only active finality providers. If false, returns all (active, inactive, jailed)
+     */
+    public async getActiveFinalityProvidersForBSN(
+        bsnId: string, 
+        network: Network = this.network,
+        activeOnly: boolean = false
+    ): Promise<FinalityProvider[]> {
+        const cacheKey = `fp:bsn:${bsnId}:${network}:${activeOnly ? 'active' : 'all'}`;
+        return this.getWithRevalidate(
+            cacheKey,
+            this.CACHE_TTL.PROVIDERS_LIST,
+            async () => {
+                const { nodeUrl } = this.getNetworkConfig();
+                
+                let activePkSet: Set<string> = new Set();
+                
+                // If we need to filter by active status, get the active providers first
+                if (activeOnly) {
+                    // 1. Get the latest block height
+                    const currentHeight = await this.babylonClient.getCurrentHeight();
+                    
+                    // 2. Get active FPs from the last block
+                    const activeResponse = await fetch(`${nodeUrl}/babylon/finality/v1/finality_providers/${currentHeight}`);
+                    if (!activeResponse.ok) {
+                        throw new Error(`HTTP error! status: ${activeResponse.status}`);
+                    }
+                    
+                    const activeData = await activeResponse.json() as ActiveProviderResponse;
+                    
+                    // Get public keys of active FPs into a set
+                    activePkSet = new Set(
+                        activeData.finality_providers
+                            .map((fp: FinalityProviderWithMeta) => fp.btc_pk_hex)
+                            .filter((pk): pk is string => pk !== undefined)
+                    );
+                }
+                
+                // 3. Get detailed information of FPs for specific BSN
+                const allProviders: FinalityProvider[] = [];
+                let nextKey = '';
+                
+                do {
+                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
+                    if (nextKey) {
+                        url.searchParams.append('pagination.key', nextKey);
+                    }
+                    
+                    const response = await fetch(url.toString());
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const data = await response.json() as QueryFinalityProvidersResponse;
+                    
+                    // Filter providers based on activeOnly parameter
+                    const providers = data.finality_providers?.map(provider => ({
+                        ...provider,
+                        bsn_id: bsnId
+                    })).filter(provider => {
+                        // If activeOnly is false, return all providers
+                        if (!activeOnly) return true;
+                        // If activeOnly is true, only return active providers
+                        return activePkSet.has(provider.btc_pk);
+                    }) || [];
+                    
+                    allProviders.push(...providers);
+                    
+                    nextKey = data.pagination?.next_key || '';
+                } while (nextKey);
+                
+                return allProviders;
+            }
+        );
+    }
+
     public async getActiveFinalityProviders(network: Network = this.network): Promise<FinalityProvider[]> {
         const cacheKey = `fp:active:${network}`;
         return this.getWithRevalidate(
             cacheKey,
             this.CACHE_TTL.PROVIDERS_LIST,
             async () => {
-                const { nodeUrl } = this.getNetworkConfig(network);
+                const { nodeUrl } = this.getNetworkConfig();
                 
                 // 1. First, get the latest block height
                 const currentHeight = await this.babylonClient.getCurrentHeight();
@@ -162,7 +262,8 @@ export class FinalityProviderService {
                 let nextKey = '';
                 
                 do {
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers`);
+                    const bsnId = this.getBsnId(network);
+                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
                     if (nextKey) {
                         url.searchParams.append('pagination.key', nextKey);
                     }
@@ -199,8 +300,9 @@ export class FinalityProviderService {
                 let nextKey = '';
                 
                 do {
-                    const { nodeUrl } = this.getNetworkConfig(network);
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers`);
+                    const { nodeUrl } = this.getNetworkConfig();
+                    const bsnId = this.getBsnId(network);
+                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
                     
                     // Add pagination parameters if we have a next key
                     if (nextKey) {
@@ -236,7 +338,7 @@ export class FinalityProviderService {
             this.CACHE_TTL.PROVIDER_DETAILS,
             async () => {
                 const [providerResponse, activeProviders] = await Promise.all([
-                    fetch(`${this.getNetworkConfig(network).nodeUrl}/babylon/btcstaking/v1/finality_providers/${fpBtcPkHex}/finality_provider`),
+                    fetch(`${this.getNetworkConfig().nodeUrl}/babylon/btcstaking/v1/finality_providers/${fpBtcPkHex}/finality_provider`),
                     this.getActiveFinalityProviders(network)
                 ]);
 
@@ -261,7 +363,7 @@ export class FinalityProviderService {
             this.CACHE_TTL.POWER,
             async () => {
                 const [powerResponse, totalPower] = await Promise.all([
-                    fetch(`${this.getNetworkConfig(network).nodeUrl}/babylon/finality/v1/finality_providers/${fpBtcPkHex}/power`),
+                    fetch(`${this.getNetworkConfig().nodeUrl}/babylon/finality/v1/finality_providers/${fpBtcPkHex}/power`),
                     this.getTotalVotingPower(network)
                 ]);
 
@@ -291,7 +393,7 @@ export class FinalityProviderService {
             this.CACHE_TTL.TOTAL_POWER,
             async () => {
                 const currentHeight = await this.babylonClient.getCurrentHeight();
-                const response = await fetch(`${this.getNetworkConfig(network).nodeUrl}/babylon/finality/v1/finality_providers/${currentHeight}`);
+                const response = await fetch(`${this.getNetworkConfig().nodeUrl}/babylon/finality/v1/finality_providers/${currentHeight}`);
                 
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
@@ -506,5 +608,101 @@ export class FinalityProviderService {
                 }
             }
         );
+    }
+
+    /**
+     * Get or create BSN Finality Provider record in database
+     */
+    public async getOrCreateBSNFinalityProvider(
+        consumerId: string,
+        fpBtcPkHex: string,
+        network: Network = this.network
+    ): Promise<Types.ObjectId> {
+        let fp = await BSNFinalityProvider.findOne({
+            consumer_id: consumerId,
+            fp_btc_pk_hex: fpBtcPkHex,
+            network: network
+        });
+
+        if (!fp) {
+            fp = new BSNFinalityProvider({
+                consumer_id: consumerId,
+                fp_btc_pk_hex: fpBtcPkHex,
+                network: network,
+                is_active: true,
+                registration_height: 0,
+                registration_tx_hash: '',
+                signature_count: 0
+            });
+            await fp.save();
+            logger.info(`[FinalityProviderService] Created BSN FP record: ${fpBtcPkHex} for consumer ${consumerId}`);
+        }
+
+        return fp._id as Types.ObjectId;
+    }
+
+    /**
+     * Update BSN FP signature count and metadata
+     */
+    public async updateBSNFinalityProviderSignature(
+        fpId: Types.ObjectId,
+        blockHeight: number
+    ): Promise<void> {
+        const fp = await BSNFinalityProvider.findById(fpId);
+        if (fp) {
+            await fp.incrementSignatureCount(blockHeight);
+        }
+    }
+
+    /**
+     * Check if BSN FP needs signature cleanup
+     */
+    public async checkBSNFinalityProviderCleanup(fpId: Types.ObjectId): Promise<boolean> {
+        const fp = await BSNFinalityProvider.findById(fpId);
+        return fp ? fp.needsCleanup() : false;
+    }
+
+    /**
+     * Update BSN FP after signature cleanup
+     */
+    public async updateBSNFinalityProviderAfterCleanup(
+        fpId: Types.ObjectId,
+        remainingCount: number,
+        newOldestHeight: number
+    ): Promise<void> {
+        const fp = await BSNFinalityProvider.findById(fpId);
+        if (fp) {
+            await fp.updateAfterCleanup(remainingCount, newOldestHeight);
+        }
+    }
+
+    /**
+     * Sync active BSN finality providers to database
+     */
+    public async syncBSNFinalityProvidersToDatabase(
+        consumerId: string,
+        network: Network = this.network
+    ): Promise<{ synced: number; errors: number }> {
+        try {
+            const providers = await this.getActiveFinalityProvidersForBSN(consumerId, network, true);
+            let synced = 0;
+            let errors = 0;
+
+            for (const provider of providers) {
+                try {
+                    await this.getOrCreateBSNFinalityProvider(consumerId, provider.btc_pk, network);
+                    synced++;
+                } catch (error) {
+                    logger.error(`Failed to sync BSN FP ${provider.btc_pk}:`, error);
+                    errors++;
+                }
+            }
+
+            logger.info(`[FinalityProviderService] BSN FP sync for ${consumerId}: ${synced} synced, ${errors} errors`);
+            return { synced, errors };
+        } catch (error) {
+            logger.error(`[FinalityProviderService] BSN FP sync failed for ${consumerId}:`, error);
+            throw error;
+        }
     }
 } 

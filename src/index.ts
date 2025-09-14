@@ -19,6 +19,8 @@ import { StatsController } from './api/controllers/stats.controller';
 import { CosmWasmScheduler } from './services/cosmwasm/scheduler.service';
 import { errorHandler } from './api/errorHandlers';
 import { initializeTransactionStats } from './services/block-processor/transaction/stats/initializeStats';
+import { IBCModule } from './services/ibc/IBCModule';
+import { BSNConsumerService } from './services/bsn/BSNConsumerService';
 
 // Load environment variables
 dotenv.config();
@@ -72,7 +74,7 @@ async function startServer() {
 
     // Initialize and start the FinalitySignatureService
     const finalityService = FinalitySignatureService.getInstance();
-    await finalityService.start();
+   // await finalityService.start();
 
     // Initialize BTCDelegationService (this will start initial sync)
     logger.info('Initializing BTCDelegationService...');
@@ -102,6 +104,27 @@ async function startServer() {
     // Initialize StatsController to start background cache refresh
     logger.info('Initializing StatsController with background cache refresh...');
     StatsController.initialize();
+    
+    // Initialize BSN Consumer sync
+    logger.info('Initializing BSN Consumer sync...');
+    const bsnConsumerService = BSNConsumerService.getInstance();
+    bsnConsumerService.syncAllConsumersToDatabase().then(result => {
+        logger.info(`BSN Consumer sync completed: ${result.synced} synced, ${result.errors} errors`);
+    }).catch(error => {
+        logger.error('BSN Consumer initial sync failed:', error);
+        // Non-fatal error, continue application startup
+    });
+    
+    // Setup periodic BSN consumer refresh (every 30 minutes)
+    setInterval(async () => {
+        try {
+            logger.info('Running periodic BSN consumer sync...');
+            const result = await bsnConsumerService.syncAllConsumersToDatabase();
+            logger.info(`Periodic BSN consumer sync completed: ${result.synced} synced, ${result.errors} errors`);
+        } catch (error) {
+            logger.error('Periodic BSN consumer sync failed:', error);
+        }
+    }, 30 * 60 * 1000); // 30 minutes
     
     // Start historical sync if BLOCK_SYNC_ENABLED is true
     if (process.env.BLOCK_SYNC_ENABLED === 'true') {
@@ -153,6 +176,16 @@ async function startServer() {
         cosmWasmScheduler.start();
         logger.info('CosmWasm indexer started successfully');
     }
+    
+    // Initialize IBC module if enabled
+    if (process.env.IBC_INDEXER_ENABLED === 'true') {
+        logger.info('Initializing IBC module...');
+        const ibcModule = IBCModule.getInstance();
+        ibcModule.initialize();
+        logger.info('IBC module initialized successfully');
+    } else {
+        logger.info('IBC module is disabled by configuration');
+    }
 
     // Special shutdown process for PM2
     const shutdown = async (signal: string) => {
@@ -163,9 +196,8 @@ async function startServer() {
             finalityService.stop();
 
             // Wait a bit for cleanup
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
             logger.info('All services stopped. Waiting for final cleanup...');
+            await new Promise(resolve => setTimeout(resolve, 1000));
 
             // Allow PM2 to use its own logging mechanism
             if (process.env.PM2_USAGE) {
