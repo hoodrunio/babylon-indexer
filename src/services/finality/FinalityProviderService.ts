@@ -26,6 +26,7 @@ export class FinalityProviderService {
     private network: Network;
     private cache: CacheService;
     private revalidationPromises: Map<string, Promise<any>> = new Map();
+    private endpointModes: Map<Network, 'bsn' | 'legacy'> = new Map();
     
     // Cache TTL values (in seconds)
     private readonly CACHE_TTL = {
@@ -71,6 +72,78 @@ export class FinalityProviderService {
             default:
                 throw new Error(`Unknown network: ${network}`);
         }
+    }
+
+    private shouldFallbackToLegacy(status: number): boolean {
+        return status === 404 || status === 501;
+    }
+
+    private getEndpointMode(network: Network): 'bsn' | 'legacy' {
+        return this.endpointModes.get(network) ?? 'bsn';
+    }
+
+    private setEndpointMode(network: Network, mode: 'bsn' | 'legacy'): void {
+        this.endpointModes.set(network, mode);
+    }
+
+    private buildFinalityProvidersUrl(
+        network: Network,
+        paginationKey: string | undefined,
+        mode: 'bsn' | 'legacy',
+        customBsnId?: string
+    ): URL {
+        const { nodeUrl } = this.getNetworkConfig();
+        const bsnId = this.getBsnId(network, customBsnId);
+
+        const basePath = mode === 'bsn'
+            ? `/babylon/btcstaking/v1/finality_providers/${bsnId}`
+            : `/babylon/btcstaking/v1/finality_providers`;
+
+        const url = new URL(`${nodeUrl}${basePath}`);
+
+        if (paginationKey) {
+            url.searchParams.append('pagination.key', paginationKey);
+        }
+
+        if (mode === 'legacy' && bsnId) {
+            url.searchParams.append('bsn_id', bsnId);
+        }
+
+        return url;
+    }
+
+    private async fetchFinalityProvidersPage(
+        network: Network,
+        paginationKey: string | undefined,
+        customBsnId?: string,
+        forcedMode?: 'bsn' | 'legacy'
+    ): Promise<{ providers: FinalityProvider[]; nextKey: string; modeUsed: 'bsn' | 'legacy' }> {
+        const modeToUse = forcedMode ?? this.getEndpointMode(network);
+        const url = this.buildFinalityProvidersUrl(network, paginationKey, modeToUse, customBsnId);
+
+        const response = await fetch(url.toString());
+
+        if (!response.ok) {
+            if (modeToUse === 'bsn' && this.shouldFallbackToLegacy(response.status)) {
+                logger.warn(`[FinalityProviderService] BSN endpoint unavailable for ${network} (status ${response.status}), falling back to legacy endpoint`);
+                this.setEndpointMode(network, 'legacy');
+                return this.fetchFinalityProvidersPage(network, paginationKey, customBsnId, 'legacy');
+            }
+
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json() as QueryFinalityProvidersResponse;
+        const providers = data.finality_providers || [];
+        const nextKey = data.pagination?.next_key || '';
+
+        this.setEndpointMode(network, modeToUse);
+
+        return {
+            providers,
+            nextKey,
+            modeUsed: modeToUse
+        };
     }
 
     private getNetworkConfig() {
@@ -171,7 +244,6 @@ export class FinalityProviderService {
             this.CACHE_TTL.PROVIDERS_LIST,
             async () => {
                 const { nodeUrl } = this.getNetworkConfig();
-                
                 let activePkSet: Set<string> = new Set();
                 
                 // If we need to filter by active status, get the active providers first
@@ -195,39 +267,25 @@ export class FinalityProviderService {
                     );
                 }
                 
-                // 3. Get detailed information of FPs for specific BSN
+                // 3. Get detailed information of FPs for specific BSN (with legacy fallback)
                 const allProviders: FinalityProvider[] = [];
-                let nextKey = '';
-                
+                let nextKey: string | undefined;
+
                 do {
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
-                    if (nextKey) {
-                        url.searchParams.append('pagination.key', nextKey);
-                    }
-                    
-                    const response = await fetch(url.toString());
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const data = await response.json() as QueryFinalityProvidersResponse;
-                    
-                    // Filter providers based on activeOnly parameter
-                    const providers = data.finality_providers?.map(provider => ({
+                    const { providers, nextKey: paginationKey } = await this.fetchFinalityProvidersPage(network, nextKey, bsnId);
+
+                    const filteredProviders = providers.map(provider => ({
                         ...provider,
                         bsn_id: bsnId
                     })).filter(provider => {
-                        // If activeOnly is false, return all providers
                         if (!activeOnly) return true;
-                        // If activeOnly is true, only return active providers
                         return activePkSet.has(provider.btc_pk);
-                    }) || [];
-                    
-                    allProviders.push(...providers);
-                    
-                    nextKey = data.pagination?.next_key || '';
+                    });
+
+                    allProviders.push(...filteredProviders);
+                    nextKey = paginationKey || undefined;
                 } while (nextKey);
-                
+
                 return allProviders;
             }
         );
@@ -259,30 +317,17 @@ export class FinalityProviderService {
                 
                 // 3. Get detailed information of all FPs
                 const allProviders: FinalityProvider[] = [];
-                let nextKey = '';
-                
+                let nextKey: string | undefined;
+
                 do {
-                    const bsnId = this.getBsnId(network);
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
-                    if (nextKey) {
-                        url.searchParams.append('pagination.key', nextKey);
-                    }
-                    
-                    const response = await fetch(url.toString());
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const data = await response.json() as QueryFinalityProvidersResponse;
-                    
-                    // Filter only active FP details
-                    const activeProviders = data.finality_providers?.filter(provider => 
+                    const { providers, nextKey: paginationKey } = await this.fetchFinalityProvidersPage(network, nextKey);
+
+                    const activeProviders = providers.filter(provider => 
                         activePkSet.has(provider.btc_pk)
-                    ) || [];
-                    
+                    );
+
                     allProviders.push(...activeProviders);
-                    
-                    nextKey = data.pagination?.next_key || '';
+                    nextKey = paginationKey || undefined;
                 } while (nextKey);
                 
                 return allProviders;
@@ -297,34 +342,17 @@ export class FinalityProviderService {
             this.CACHE_TTL.PROVIDERS_LIST,
             async () => {
                 const allProviders: FinalityProvider[] = [];
-                let nextKey = '';
-                
+                let nextKey: string | undefined;
+
                 do {
-                    const { nodeUrl } = this.getNetworkConfig();
-                    const bsnId = this.getBsnId(network);
-                    const url = new URL(`${nodeUrl}/babylon/btcstaking/v1/finality_providers/${bsnId}`);
-                    
-                    // Add pagination parameters if we have a next key
-                    if (nextKey) {
-                        url.searchParams.append('pagination.key', nextKey);
+                    const { providers, nextKey: paginationKey } = await this.fetchFinalityProvidersPage(network, nextKey);
+
+                    if (providers.length > 0) {
+                        allProviders.push(...providers);
                     }
-                    
-                    const response = await fetch(url.toString());
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const data = await response.json() as QueryFinalityProvidersResponse;
-                    
-                    // Add providers from current page to our collection
-                    if (data.finality_providers) {
-                        allProviders.push(...data.finality_providers);
-                    }
-                    
-                    // Get next key from pagination response
-                    nextKey = data.pagination?.next_key || '';
-                    
-                } while (nextKey); // Continue while we have a next key
+
+                    nextKey = paginationKey || undefined;
+                } while (nextKey);
                 
                 return allProviders;
             }
