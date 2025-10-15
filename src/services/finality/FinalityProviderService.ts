@@ -26,7 +26,7 @@ export class FinalityProviderService {
     private network: Network;
     private cache: CacheService;
     private revalidationPromises: Map<string, Promise<any>> = new Map();
-    private endpointModes: Map<Network, 'bsn' | 'legacy'> = new Map();
+    private useBsnEndpoints: boolean;
     
     // Cache TTL values (in seconds)
     private readonly CACHE_TTL = {
@@ -41,7 +41,9 @@ export class FinalityProviderService {
             this.babylonClient = BabylonClient.getInstance(); // No default network
             this.network = this.babylonClient.getNetwork();
             this.cache = CacheService.getInstance();
-            logger.info(`[FinalityProviderService] Client initialized successfully for network: ${this.network}`);
+            const useBsnEnv = process.env.USE_BSN_ENDPOINT ?? 'true';
+            this.useBsnEndpoints = !(useBsnEnv.toLowerCase() === 'false' || useBsnEnv === '0');
+            logger.info(`[FinalityProviderService] Client initialized successfully for network: ${this.network}. BSN endpoints enabled: ${this.useBsnEndpoints}`);
         } catch (error) {
             logger.error('[FinalityProviderService] Failed to initialize BabylonClient:', error);
             throw new Error('[FinalityProviderService] Failed to initialize BabylonClient. Please check your NETWORK environment variable.');
@@ -74,38 +76,25 @@ export class FinalityProviderService {
         }
     }
 
-    private shouldFallbackToLegacy(status: number): boolean {
-        return status === 404 || status === 501;
-    }
-
-    private getEndpointMode(network: Network): 'bsn' | 'legacy' {
-        return this.endpointModes.get(network) ?? 'bsn';
-    }
-
-    private setEndpointMode(network: Network, mode: 'bsn' | 'legacy'): void {
-        this.endpointModes.set(network, mode);
-    }
-
     private buildFinalityProvidersUrl(
         network: Network,
-        paginationKey: string | undefined,
-        mode: 'bsn' | 'legacy',
+        paginationKey?: string,
         customBsnId?: string
     ): URL {
         const { nodeUrl } = this.getNetworkConfig();
         const bsnId = this.getBsnId(network, customBsnId);
 
-        const basePath = mode === 'bsn'
+        const path = this.useBsnEndpoints
             ? `/babylon/btcstaking/v1/finality_providers/${bsnId}`
             : `/babylon/btcstaking/v1/finality_providers`;
 
-        const url = new URL(`${nodeUrl}${basePath}`);
+        const url = new URL(`${nodeUrl}${path}`);
 
         if (paginationKey) {
             url.searchParams.append('pagination.key', paginationKey);
         }
 
-        if (mode === 'legacy' && bsnId) {
+        if (!this.useBsnEndpoints && bsnId) {
             url.searchParams.append('bsn_id', bsnId);
         }
 
@@ -114,20 +103,16 @@ export class FinalityProviderService {
 
     private async fetchFinalityProvidersPage(
         network: Network,
-        paginationKey: string | undefined,
-        customBsnId?: string,
-        forcedMode?: 'bsn' | 'legacy'
-    ): Promise<{ providers: FinalityProvider[]; nextKey: string; modeUsed: 'bsn' | 'legacy' }> {
-        const modeToUse = forcedMode ?? this.getEndpointMode(network);
-        const url = this.buildFinalityProvidersUrl(network, paginationKey, modeToUse, customBsnId);
+        paginationKey?: string,
+        customBsnId?: string
+    ): Promise<{ providers: FinalityProvider[]; nextKey: string }> {
+        const url = this.buildFinalityProvidersUrl(network, paginationKey, customBsnId);
 
         const response = await fetch(url.toString());
 
         if (!response.ok) {
-            if (modeToUse === 'bsn' && this.shouldFallbackToLegacy(response.status)) {
-                logger.warn(`[FinalityProviderService] BSN endpoint unavailable for ${network} (status ${response.status}), falling back to legacy endpoint`);
-                this.setEndpointMode(network, 'legacy');
-                return this.fetchFinalityProvidersPage(network, paginationKey, customBsnId, 'legacy');
+            if (this.useBsnEndpoints && (response.status === 404 || response.status === 501)) {
+                logger.warn(`[FinalityProviderService] BSN endpoint returned ${response.status}. Set USE_BSN_ENDPOINT=false to temporarily use legacy endpoint.`);
             }
 
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -137,12 +122,9 @@ export class FinalityProviderService {
         const providers = data.finality_providers || [];
         const nextKey = data.pagination?.next_key || '';
 
-        this.setEndpointMode(network, modeToUse);
-
         return {
             providers,
-            nextKey,
-            modeUsed: modeToUse
+            nextKey
         };
     }
 
